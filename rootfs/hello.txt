@@ -1,0 +1,2 @@
+Hello from the big32 root filesystem.
+This file lives on the virtio disk, mounted as / by Linux 6.6.52.

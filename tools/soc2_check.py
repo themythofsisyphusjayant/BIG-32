@@ -26,6 +26,28 @@ TESTS = {
     "virtio": {
         "uart": [],
     },
+    # Attempt 18 Step 9: kernel's vm_get_features/vm_finalize
+    # sequence for a version-2 device -- sel=1 feature word
+    # must carry VIRTIO_F_VERSION_1, FEATURES_OK must stick,
+    # then a sector read through the v1 queue path. FAILS
+    # (a0==1) on the pre-fix model, PASSES on the fixed model.
+    "virtio_v1": {
+        "uart": [],
+    },
+    # Attempt 18 Step 16: one kick must drain ALL pending
+    # chains. FAILS (a0>=1, used idx stuck at 1) on the
+    # pre-fix model, PASSES on the fixed model.
+    "virtio_drain": {
+        "uart": [],
+    },
+    # Attempt 18 fix: interrupt entry with a csrrci sstatus in
+    # EX at entry must leave the entry's SPP=1 intact (a0==0).
+    # The checked-in .s carries the calibrated pad (122); the
+    # test FAILS (a0==1) on the pre-fix core and PASSES on the
+    # fixed core. See tools/entry_drain_cal.py for recalibration.
+    "entry_drain": {
+        "uart": [],
+    },
 }
 
 

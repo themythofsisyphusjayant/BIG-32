@@ -25,13 +25,14 @@ from model import run  # noqa: E402
 
 PROGS = ["sum", "fib", "mul_loop", "call_demo", "mul_demo", "mulh_demo",
          "div_demo", "div_edge", "div_zero", "rem_zero", "amo_demo",
-         "sc_fail", "csr_demo", "edge_cases", "kernel", "pipe_hazards"]
+         "sc_fail", "csr_demo", "edge_cases", "kernel", "pipe_hazards",
+         "misalign_demo"]
 EXPECTED_A0 = {"sum": 55, "fib": 55, "mul_loop": 42, "call_demo": 112,
                "mul_demo": 83810205, "mulh_demo": 2, "div_demo": 1402,
                "div_edge": 2147483648, "div_zero": 4294967295,
                "rem_zero": 42, "amo_demo": 42, "sc_fail": 101,
                "csr_demo": 4660, "edge_cases": 0, "kernel": 10,
-               "pipe_hazards": 1406}
+               "pipe_hazards": 1406, "misalign_demo": 420555360}
 # v7 single-cycle counts, measured with sim/tb_big32.v 26 Oct 2026.
 V7_CYCLES = {"sum": 35, "fib": 51, "mul_loop": 27, "call_demo": 16,
              "mul_demo": 7, "mulh_demo": 7, "div_demo": 9, "div_edge": 5,

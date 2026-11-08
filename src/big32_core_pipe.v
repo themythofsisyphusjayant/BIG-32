@@ -82,6 +82,15 @@
 // signed/unsigned branches for shifts or division. The divider
 // and the SRA/SRAI paths use if/else with signed wires, and
 // absolute values are formed as (~x + 1) on unsigned wires.
+//
+// Phase 6 (unaligned loads/stores in hardware): regular
+// loads/stores no longer trap on misalignment — the tops
+// already deliver the right bytes (see the MEM comment and
+// ex_misaligned below). AMO/LR/SC still trap, and a
+// load/store crossing a 4 KiB page boundary under
+// translation still traps (the second page needs its own
+// translation). The v7 single-cycle core is untouched and
+// keeps the old trap-everything behaviour.
 // ---------------------------------------------------------------------------
 `default_nettype none
 
@@ -134,6 +143,11 @@ module big32_core_pipe (
     reg        ptw_is_fetch, ptw_is_store;
     reg [31:0] ptw_va, ptw_root_base, ptw_pte1, ptw_data_pa;
     reg        ptw_data_done, ptw_data_fault;
+    // Phase 6: whether the completed data walk accepted a
+    // superpage (level-1 leaf) or a 4 KiB page (level-0
+    // leaf / state-4 completion). Read by the cross-page
+    // misaligned check in the ptw_data_done cycle.
+    reg        ptw_data_super;
     reg [31:0] ptw_data_fault_cause; // 13 load, 15 store/AMO
     // Cached fetch translation for the current pc (no TLB: this
     // is a one-entry "current fetch" cache, refilled by a walk
@@ -828,6 +842,9 @@ module big32_core_pipe (
     // never reach the TLB (the walker faults them).
     reg tlb_data_hit, tlb_data_perm_ok;
     reg tlb_data_rw_ok, tlb_data_priv_ok, tlb_data_dbit;
+    // Phase 6: whether the hit entry is a superpage (used by
+    // the cross-page misaligned check below).
+    reg tlb_data_super;
     reg [31:0] tlb_data_pa;
     integer td;
     always @* begin
@@ -836,6 +853,7 @@ module big32_core_pipe (
         tlb_data_rw_ok = 1'b0;
         tlb_data_priv_ok = 1'b0;
         tlb_data_dbit = 1'b0;
+        tlb_data_super = 1'b0;
         tlb_data_pa = 32'b0;
         for (td = 0; td < 16; td = td + 1) begin
             if (tlb_valid[td]) begin
@@ -852,6 +870,7 @@ module big32_core_pipe (
                               !csr_sstatus[18]) &&
                             !((priv == 2'd0) && !tlb_u[td]);
                         tlb_data_dbit = tlb_d[td];
+                        tlb_data_super = tlb_super[td];
                     end
                 end else if (tlb_vpn[td] == ex_va_comb[31:12]) begin
                     tlb_data_hit = 1'b1;
@@ -864,6 +883,7 @@ module big32_core_pipe (
                           !csr_sstatus[18]) &&
                         !((priv == 2'd0) && !tlb_u[td]);
                     tlb_data_dbit = tlb_d[td];
+                    tlb_data_super = tlb_super[td];
                 end
             end
         end
@@ -890,27 +910,55 @@ module big32_core_pipe (
                                      ex_is_amo)) ? ptw_data_pa :
                                    tlb_data_hit_ok ? tlb_data_pa :
                                    ex_va_comb;
-    // Phase 5 misaligned access: load/store halfword needs
-    // addr[0]==0, load/store/AMO word needs addr[1:0]==0.
-    // Byte accesses are never misaligned. A misaligned LR
-    // is a load misaligned (cause 4); a misaligned SC/AMO
-    // is a store misaligned (cause 6).
+    // Phase 6 unaligned loads/stores in hardware: regular
+    // loads/stores no longer trap on misalignment. The
+    // simulation tops already deliver the right bytes: the
+    // pipe top reads bytes at addr..addr+3, the soc2 top
+    // merges the two RAM words at addr..addr+3, and both
+    // apply the core's RELATIVE store mask shifted by
+    // addr[1:0], so a within-page unaligned access just
+    // works, with the core's existing byte extraction
+    // (load_data) and relative mask (d_wmask_comb)
+    // unchanged. Two cases still trap, exactly as before:
+    // (a) AMO/LR/SC with addr[1:0]!=0 — the spec requires
+    // AMOs naturally aligned (a misaligned LR is a load
+    // misaligned, cause 4; a misaligned SC/AMO is a store
+    // misaligned, cause 6); (b) a load/store that CROSSES
+    // a 4 KiB page boundary under translation — the
+    // second page needs its own translation, which this
+    // core does not do (the tops merge by physical
+    // adjacency, which is wrong across pages). A cross
+    // within a 4 MB superpage is fine (physical
+    // contiguity holds) and does not trap; bare mode
+    // never traps (PA == VA, contiguity holds).
+    // The page size comes from the TLB hit, or from the
+    // completed walk (ptw_data_super); while a walk is
+    // still in flight neither is valid yet, so no trap
+    // fires and the walk proceeds — the trap is decided
+    // in the ptw_data_done cycle, before the instruction
+    // advances to MEM.
     wire ex_is_lr = ex_is_amo && (ex_amo_f5 == 5'b00010);
-    wire ex_misaligned = (ex_is_load &&
-                          (((id_ex_funct3 == 3'b001) ||
-                            (id_ex_funct3 == 3'b101)) &&
-                           ex_va_comb[0])) ||
-                         (ex_is_load &&
-                          (id_ex_funct3 == 3'b010) &&
+    reg [2:0] ex_mem_size;
+    always @* begin
+        case (id_ex_funct3[1:0])
+            2'b00: ex_mem_size = 3'd1;
+            2'b01: ex_mem_size = 3'd2;
+            2'b10: ex_mem_size = 3'd4;
+            default: ex_mem_size = 3'd0;
+        endcase
+    end
+    wire ex_cross_page = (ex_is_load || ex_is_store) &&
+                         (ex_mem_size != 3'd0) &&
+                         (({1'b0, ex_va_comb[11:0]} +
+                           {10'b0, ex_mem_size}) > 13'd4096);
+    wire ex_page_is_super = tlb_data_hit ? tlb_data_super :
+                            ptw_data_super;
+    wire ex_cross_trap = fetch_trans_enabled && ex_cross_page &&
+                         !ex_page_is_super &&
+                         (tlb_data_hit || ptw_data_done);
+    wire ex_misaligned = (ex_is_amo &&
                           (ex_va_comb[1:0] != 2'b00)) ||
-                         (ex_is_store &&
-                          (id_ex_funct3 == 3'b001) &&
-                          ex_va_comb[0]) ||
-                         (ex_is_store &&
-                          (id_ex_funct3 == 3'b010) &&
-                          (ex_va_comb[1:0] != 2'b00)) ||
-                         (ex_is_amo &&
-                          (ex_va_comb[1:0] != 2'b00));
+                         ex_cross_trap;
     wire [31:0] ex_mis_cause = (ex_is_load ||
                                 (ex_is_amo && ex_is_lr)) ?
                                32'd4 : 32'd6;
@@ -1011,9 +1059,14 @@ module big32_core_pipe (
     // Phase 5: A/D bits ARE updated (walker state 4 writes
     // the PTE back with A set, and D set for stores/AMOs),
     // and a 16-entry TLB caches translations (flushed by
-    // sfence.vma and satp writes). Misaligned accesses trap
-    // (load cause 4, store/AMO cause 6) before any walk;
-    // the Phase 1-4 wrap-into-next-page behaviour is gone.
+    // sfence.vma and satp writes). Phase 6: regular
+    // loads/stores no longer trap on misalignment (see
+    // ex_misaligned); only AMO misalignment and
+    // cross-4 KiB-page loads/stores trap (load cause 4,
+    // store cause 6) — the cross-page trap is decided in
+    // the ptw_data_done cycle, after the walk, not
+    // before it; the Phase 1-4 wrap-into-next-page
+    // behaviour is gone.
     wire data_trans_needed = fetch_trans_enabled &&
                              (ex_is_load || ex_is_store || ex_is_amo) &&
                              !ptw_data_done && !ptw_data_fault &&
@@ -1317,6 +1370,52 @@ module big32_core_pipe (
     // MEM/WB below keeps advancing, so the state block can commit
     // them. Freezing here was the first pipe bug found: the
     // instruction immediately before ECALL lost its writeback.
+    //
+    // Attempt 18 fix (entry-vs-drain ordering), wires shared by
+    // the EX/MEM capture below and the MEM/WB capture after it.
+    // A trap/interrupt entry writes sepc/scause/stval/sstatus
+    // (S) or mepc/mcause/mtval/mstatus (M). A CSR write
+    // draining from MEM or EX in the entry cycle would commit
+    // AFTER the entry (MEM: next edge; EX: two edges later)
+    // and overwrite the entry's values wholesale with its
+    // pre-entry computation -- the PID 1 panic was exactly
+    // this (csrrci sstatus in MEM at a timer entry
+    // clobbering SPP 1 -> 0), and the directed test shows the
+    // same hazard with the CSR write in EX at entry. Suppress
+    // only the conflicting CSR-register write at the capture
+    // edge; the draining instruction's rd write still commits
+    // (it read the pre-entry CSR value, which is correct),
+    // and CSR writes to CSRs the entry does not touch drain
+    // normally. A CSR write already in WB at entry is safe
+    // (the state block orders WB before entry, so entry
+    // wins), and a CSR write still in ID at entry is flushed
+    // with the ID stage, so EX and MEM are the only stages
+    // that need suppression. Covers all four entry paths:
+    // S-trap and S-interrupt, M-trap and M-interrupt.
+    wire entry_to_s = (ex_trap && ex_trap_to_s) ||
+                      (int_take && int_to_s);
+    wire entry_to_m = (ex_trap && !ex_trap_to_s) ||
+                      (int_take && !int_to_s);
+    wire mem_csr_entry_conflict =
+        ex_mem_csr_write &&
+        ((entry_to_s && ((ex_mem_csr_addr == 12'h100) ||
+                         (ex_mem_csr_addr == 12'h141) ||
+                         (ex_mem_csr_addr == 12'h142) ||
+                         (ex_mem_csr_addr == 12'h143))) ||
+         (entry_to_m && ((ex_mem_csr_addr == 12'h300) ||
+                         (ex_mem_csr_addr == 12'h341) ||
+                         (ex_mem_csr_addr == 12'h342) ||
+                         (ex_mem_csr_addr == 12'h343))));
+    wire ex_csr_entry_conflict =
+        ex_csr_write &&
+        ((entry_to_s && ((id_ex_csr_addr == 12'h100) ||
+                         (id_ex_csr_addr == 12'h141) ||
+                         (id_ex_csr_addr == 12'h142) ||
+                         (id_ex_csr_addr == 12'h143))) ||
+         (entry_to_m && ((id_ex_csr_addr == 12'h300) ||
+                         (id_ex_csr_addr == 12'h341) ||
+                         (id_ex_csr_addr == 12'h342) ||
+                         (id_ex_csr_addr == 12'h343))));
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             ex_mem_pc <= 32'b0;
@@ -1376,7 +1475,8 @@ module big32_core_pipe (
                 ex_mem_is_sc <= ex_is_amo && (ex_amo_f5 == 5'b00011);
                 ex_mem_is_lr <= ex_is_amo && (ex_amo_f5 == 5'b00010);
                 ex_mem_amo_funct5 <= ex_amo_f5;
-                ex_mem_csr_write <= ex_csr_write;
+                ex_mem_csr_write <= ex_csr_write &&
+                                    !ex_csr_entry_conflict;
                 ex_mem_csr_addr <= id_ex_csr_addr;
                 ex_mem_csr_new <= ex_csr_new;
             end
@@ -1386,6 +1486,40 @@ module big32_core_pipe (
     // ================= Sequential: MEM/WB ============================
     // Not frozen by halted either (see the EX/MEM note): this is
     // what lets the pre-ECALL instructions commit during drain.
+    //
+    // Attempt 18 fix (entry-vs-drain ordering), MEM half:
+    // when a trap or interrupt entry is taken in this cycle,
+    // a CSR write draining from MEM must not overwrite, in
+    // the NEXT cycle, any CSR the entry updates. The EX half
+    // lives in the EX/MEM capture above (a CSR write in EX
+    // at entry would commit two edges later and clobber
+    // just the same). Same-cycle WB writes are already safe
+    // (the state block orders them before the entry block,
+    // so entry wins), but the MEM drain lands one cycle
+    // after entry and used to clobber it: the PID 1 panic
+    // came from a csrrci sstatus in MEM at a timer-interrupt
+    // entry overwriting the entry's SPP=1 with its pre-entry
+    // value 0x20. Suppress only the conflicting write; the
+    // draining instruction's rd write still commits (it read
+    // the pre-entry CSR value, which is correct), and CSR
+    // writes to CSRs the entry does not touch drain
+    // normally. Covers all four entry paths: S-trap and
+    // S-interrupt (sepc/scause/stval/sstatus), M-trap and
+    // M-interrupt (mepc/mcause/mtval/mstatus). Chosen over
+    // delaying entry by a cycle: no pipeline stall, no sepc
+    // accounting hazard, and it matches the core's existing
+    // same-cycle rule (entry wins over an older CSR write to
+    // the same CSR). Honest wart, shared with that
+    // same-cycle rule: an older CSR write to an entry CSR is
+    // dropped outright rather than forwarded into the entry's
+    // status computation, so e.g. a draining irq-disable's
+    // SIE bit is not reflected in the SPIE the handler's sret
+    // restores. Forwarding the draining value into the entry
+    // computation would close that wart but touches every
+    // entry variant (including the mret/sret-plus-interrupt
+    // cases); it is a separate change, not folded in here.
+    // (entry_to_s/entry_to_m/mem_csr_entry_conflict are
+    // defined above the EX/MEM block.)
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             mem_wb_rd <= 5'b0;
@@ -1398,7 +1532,8 @@ module big32_core_pipe (
             mem_wb_rd <= ex_mem_rd;
             mem_wb_data <= mem_result;
             mem_wb_reg_write <= ex_mem_reg_write;
-            mem_wb_csr_write <= ex_mem_csr_write;
+            mem_wb_csr_write <= ex_mem_csr_write &&
+                                !mem_csr_entry_conflict;
             mem_wb_csr_addr <= ex_mem_csr_addr;
             mem_wb_csr_new <= ex_mem_csr_new;
         end
@@ -1430,6 +1565,7 @@ module big32_core_pipe (
             ptw_pte1 <= 32'b0;
             ptw_data_pa <= 32'b0;
             ptw_data_done <= 1'b0;
+            ptw_data_super <= 1'b0;
             ptw_data_fault <= 1'b0;
             ptw_data_fault_cause <= 32'b0;
             fetch_pa <= 32'b0;
@@ -1541,6 +1677,7 @@ module big32_core_pipe (
                                 ptw_data_pa <= {ptw_pte_now[29:20],
                                                 ptw_va[21:0]};
                                 ptw_data_done <= 1'b1;
+                                ptw_data_super <= 1'b1;
                             end
                             ptw_state <= 3'd0;
                         end
@@ -1602,6 +1739,7 @@ module big32_core_pipe (
                                             ptw_pte_now[19:10],
                                             ptw_va[11:0]};
                             ptw_data_done <= 1'b1;
+                            ptw_data_super <= 1'b0;
                         end
                         ptw_state <= 3'd0;
                     end
@@ -1619,6 +1757,7 @@ module big32_core_pipe (
                     end else begin
                         ptw_data_pa <= ptw_accept_pa;
                         ptw_data_done <= 1'b1;
+                        ptw_data_super <= ptw_accept_super;
                     end
                     ptw_state <= 3'd0;
                 end
@@ -1626,6 +1765,15 @@ module big32_core_pipe (
                     ptw_state <= 3'd0;
                 end
             endcase
+            // Phase 6: a data instruction that traps in EX
+            // (the cross-page misaligned trap) must not
+            // leave a stale ptw_data_done behind for the
+            // next memory instruction. Placed after the
+            // case so it wins over a same-cycle walk
+            // completion for an instruction that traps
+            // anyway (dropping that translation is safe).
+            if (ex_trap && (ex_is_load || ex_is_store || ex_is_amo))
+                ptw_data_done <= 1'b0;
         end
     end
 

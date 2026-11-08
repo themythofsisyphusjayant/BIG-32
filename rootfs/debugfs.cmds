@@ -1,0 +1,7 @@
+mkdir /proc
+mkdir /sys
+mkdir /dev
+write init /init
+sif /init mode 0100755
+write hello.txt /hello.txt
+sif /hello.txt mode 0100644

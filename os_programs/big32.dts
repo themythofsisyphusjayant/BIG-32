@@ -7,7 +7,19 @@
     model = "big32 Phase 5";
 
     chosen {
-        bootargs = "earlycon";
+        /* Attempt-10 change (27 Oct 2026): console=ttyS0
+           added. Attempt 9 proved the livelock broken
+           (console_init prints) but then went silent on
+           UART because bootargs carried only earlycon,
+           so printk's preferred console became the dummy
+           tty0 (no VGA hardware). With console=ttyS0
+           the UART stays the preferred console after
+           the bootconsole is disabled. The UART node
+           below is the SOC2 16550 at 0x10010000, the
+           only serial port in the tree, so it is
+           ttyS0; stdout-path already points at it and
+           earlycon is retained for early output. */
+        bootargs = "earlycon console=ttyS0";
         stdout-path = "/soc/uart@10010000";
     };
 
@@ -19,12 +31,22 @@
     cpus {
         #address-cells = <1>;
         #size-cells = <0>;
+        /* Attempt-8 fix (27 Oct 2026): timebase-frequency
+           lives HERE, in /cpus, not in cpu@0. Attempt 7
+           panicked in time_init ("RISC-V system with no
+           'timebase-frequency' in DTS") because time_init
+           reads it from the /cpus node itself
+           (of_find_node_by_path("/cpus")), and the
+           RISC-V binding disallows it in the cpu node.
+           MOVED (not copied) from cpu@0 for exactly that
+           reason. The boot-DTB builder still rewrites it
+           10 MHz -> 100 kHz by literal string match. */
+        timebase-frequency = <10000000>;
         cpu0: cpu@0 {
             device_type = "cpu";
             compatible = "riscv";
             riscv,isa = "rv32ima";
             mmu-type = "riscv,sv32";
-        timebase-frequency = <10000000>;
             status = "okay";
             /* reg = hartid: without it the kernel prints
                "Found CPU without hart ID" / "Unable to
@@ -33,6 +55,26 @@
                but isa parsing finds nothing). Found from
                the attempt-5 boot log, 26 Oct 2026. */
             reg = <0>;
+            /* Attempt-7 fix (27 Oct 2026): the hart-level
+               interrupt controller node the riscv
+               interrupt bindings require. Attempt 6
+               panicked with "No interrupt controller
+               found" because PLIC/CLINT
+               interrupts-extended pointed at cpu@0,
+               which is NOT an interrupt controller
+               (no interrupt-controller property, no
+               #interrupt-cells, no cpu-intc child), so
+               of_irq_init never registered any parent
+               and the PLIC was never probed. The PLIC
+               and CLINT must reference THIS node, not
+               cpu@0 — cf. the sifive,plic binding
+               example (interrupts-extended =
+               <&cpu0_intc 11>). */
+            cpu_intc: interrupt-controller {
+                compatible = "riscv,cpu-intc";
+                #interrupt-cells = <1>;
+                interrupt-controller;
+            };
         };
     };
 
@@ -64,13 +106,17 @@
                (seen in the attempt-5 boot log: PLIC
                unregistered, so no UART/virtio IRQs).
                M external = 11, S external = 9, hart 0. */
-            interrupts-extended = <&cpu0 11 &cpu0 9>;
+            interrupts-extended = <&cpu_intc 11 &cpu_intc 9>;
         };
 
         clint@2000000 {
             compatible = "riscv,clint0";
             reg = <0x02000000 0x00010000>;
-            interrupts-extended = <&cpu0 7 &cpu0 3>;
+            /* Same attempt-7 fix as the PLIC: the CLINT
+               had the same defect (pointing at cpu@0
+               instead of the cpu-intc child). M timer =
+               7, S timer = 3, hart 0. */
+            interrupts-extended = <&cpu_intc 7 &cpu_intc 3>;
         };
 
         virtio@10001000 {

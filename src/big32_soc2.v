@@ -49,7 +49,16 @@
 // (S-mode test programs, and later a kernel) does the usual
 // sequence: reset (Status=0), ACKNOWLEDGE, DRIVER, read
 // features, FEATURES_OK, set queue addresses, QUEUE_READY,
-// DRIVER_OK, then QueueNotify. On notify the FSM walks the
+// DRIVER_OK, then QueueNotify. Feature negotiation is v1:
+// DeviceFeatures (0x010) is selected by DeviceFeaturesSel
+// (0x014); sel=1 bit 0 advertises VIRTIO_F_VERSION_1, which
+// the Linux virtio-mmio driver requires of a version-2
+// device. The queue path needs no v1-specific change: the
+// split-queue layout (16-byte descriptors, avail ring,
+// used ring) and the Desc/Driver/Device Low/High address
+// registers are shared by legacy and v1, the guest is
+// little-endian as v1 requires, and legacy QueuePFN is
+// never used by a v1 driver. On notify the FSM walks the
 // descriptor chain from guest RAM, copies data between RAM
 // and the internal disk array (DISK_BYTES, default 1 MiB =
 // 2048 sectors of 512 bytes), writes the used ring, sets
@@ -76,7 +85,14 @@ module big32_soc2 #(
     input  wire [7:0]  rx_data,
     input  wire        rx_valid,
     input  wire [7:0]  rx2_data,
-    input  wire        rx2_valid
+    input  wire        rx2_valid,
+    output wire [7:0]  net_tx,
+    output wire        net_tx_valid,
+    input  wire [7:0]  net_rx_data,
+    input  wire        net_rx_valid,
+    input  wire [31:0] ptr_x,
+    input  wire [31:0] ptr_y,
+    input  wire        ptr_btn
 );
     localparam [31:0] RAM_BASE = 32'h80000000;
     localparam [31:0] PLIC_BASE = 32'h0C000000;
@@ -133,6 +149,77 @@ module big32_soc2 #(
         ((u16550_dr && u16550_ier[0]) ? 8'hC4 : 8'hC2) : 8'hC1;
     wire [7:0] u16550_lsr = {1'b0, 1'b1, 1'b1, 3'b0, 1'b0, u16550_dr};
     // LSR bits: 7=0, 6=TEMT=1, 5=THRE=1, 4-2=0, 1=0, 0=DR.
+
+    // ---- Legacy UART RX (0x10000004) ---------------------------------
+    // The pipelined core already implements the legacy RX contract
+    // (load from 0x10000004 returns the byte when ready, -1 when
+    // empty; uart_rx_pop fires on a real load while ready), but
+    // the SOC tied uart_rx_ready to 0, so no byte could ever
+    // arrive. This FIFO connects the top-level rx_data/rx_valid
+    // pins to the core, in the same push/pop discipline as the
+    // 16550 FIFO below. Full at 16 bytes, further bytes drop.
+    reg [7:0] rx_fifo [0:15];
+    reg [3:0] rx_head, rx_tail;
+    reg [4:0] rx_count;
+    wire rx_ready_w = (rx_count != 5'd0);
+    wire [7:0] rx_byte_w = rx_fifo[rx_head];
+
+    // ---- Network packet device (0x10003000) ------------------------
+    // A serial link device: SLIP over a serial line (RFC 1055).
+    // The kernel's SLIP + checksum + echo stack talks to it, and
+    // bytes cross the device boundary to a peer instead of a
+    // shared-memory loopback. Registers (word-aligned):
+    //   +0x00 TX_DATA (WO): write a byte -> transmit queue.
+    //   +0x04 RX_DATA (RO): read -> pop a byte, or -1 if empty.
+    //   +0x08 STATUS  (RO): bit0 = RX ready, bit1 = TX not full.
+    // FIFOs are 64 bytes; a full TX FIFO drops the written
+    // byte, a full RX FIFO drops the incoming byte. TX drains
+    // one byte per cycle to the net_tx pins. RX pop uses the
+    // same mem_load_w discipline as the 16550 RBR.
+    localparam [31:0] NET_BASE = 32'h10003000;
+    // ---- Text-mode framebuffer (0x10004000) ------------------------
+    // VGA-text-style VRAM: 80x25 cells, 2 bytes per cell (char
+    // + attribute), stored as 1000 words (2 cells per word:
+    // low half = even cell, high half = odd cell). Word
+    // stores only (the language's poke32 is a word store);
+    // reads return the aligned word, 0 for unaligned. VRAM
+    // is NOT reset-cleared: like real hardware it powers up
+    // undefined, and the kernel must clear it. No new pins:
+    // the display side reads this array (the testbench
+    // reads it hierarchically; a real display would scan it).
+    localparam [31:0] FB_BASE = 32'h10004000;
+    reg [31:0] vramw [0:999];
+    // ---- Pixel framebuffer (0x10020000) --------------------------
+    // Mode-13h-style, grown to 640x480 for the macOS look:
+    // 8 bits per pixel, 307200 bytes stored as 76800 words.
+    // Byte 0 of a word is the leftmost of its 4 pixels. Word
+    // stores only, aligned-word reads, NOT reset-cleared
+    // (same rule as the text VRAM). A real display would
+    // scan this through a palette; the bytes here are
+    // palette indices, and the palette itself is a later
+    // step, not this one.
+    localparam [31:0] PIX_BASE = 32'h10020000;
+    reg [31:0] pixw [0:76799];
+    // ---- Pointer device (0x10006000) ---------------------------
+    // Absolute pointer, TB-driven for now (like a
+    // touchscreen reporting position): X +0x00, Y +0x04,
+    // buttons +0x08 (bit0 = primary). Read-only; the
+    // kernel polls. Unconnected top-level pins (other
+    // testbenches) read as 0 via the x-guards below.
+    localparam [31:0] PTR_BASE = 32'h10006000;
+    wire [31:0] ptr_x_w = ((^ptr_x) === 1'bx) ? 32'd0 : ptr_x;
+    wire [31:0] ptr_y_w = ((^ptr_y) === 1'bx) ? 32'd0 : ptr_y;
+    wire ptr_btn_w = ((^ptr_btn) === 1'bx) ? 1'b0 : ptr_btn;    reg [7:0] net_tx_fifo [0:63];
+    reg [7:0] net_rx_fifo [0:63];
+    reg [5:0] net_tx_head, net_tx_tail;
+    reg [5:0] net_rx_head, net_rx_tail;
+    reg [6:0] net_tx_count, net_rx_count;
+    reg [7:0] net_tx_r;
+    reg net_tx_valid_r;
+    assign net_tx = net_tx_r;
+    assign net_tx_valid = net_tx_valid_r;
+    wire net_rx_ready_w = (net_rx_count != 7'd0);
+    wire net_tx_notfull_w = (net_tx_count != 7'd64);
 
     // ---- PLIC --------------------------------------------------------
     reg [2:0] plic_prio [1:3];
@@ -244,7 +331,7 @@ module big32_soc2 #(
         .d_we_o(d_we_w),
         .irq_timer(irq_timer_w), .irq_ext(plic_irq_w),
         .irq_soft(sbi_ipi_pending),
-        .uart_rx_ready(1'b0), .uart_rx_data(8'b0),
+        .uart_rx_ready(rx_ready_w), .uart_rx_data(rx_byte_w),
         .uart_rx_pop(rx_pop_w), .mem_load_o(mem_load_w)
     );
     assign uart_tx = u16550_tx_valid ? u16550_tx : core_tx;
@@ -265,6 +352,16 @@ module big32_soc2 #(
                         (d_addr_w < (UART16550_BASE + 32'h100));
     wire in_virtio = (d_addr_w >= VIRTIO_BASE) &&
                      (d_addr_w < (VIRTIO_BASE + 32'h1000));
+    wire in_net = (d_addr_w >= NET_BASE) &&
+                  (d_addr_w < (NET_BASE + 32'h10));
+    wire in_fb = (d_addr_w >= FB_BASE) &&
+                 (d_addr_w < (FB_BASE + 32'h1000));
+    wire [31:0] fb_idx = (d_addr_w - FB_BASE) >> 2;
+    wire in_pix = (d_addr_w >= PIX_BASE) &&
+                  (d_addr_w < (PIX_BASE + 32'h4B000));
+    wire [31:0] pix_idx = (d_addr_w - PIX_BASE) >> 2;
+    wire in_ptr = (d_addr_w >= PTR_BASE) &&
+                  (d_addr_w < (PTR_BASE + 32'h10));
     wire in_clint = ((d_addr_w >= 32'h02004000) &&
                      (d_addr_w < 32'h02004010)) ||
                     ((d_addr_w >= 32'h0200BFF8) &&
@@ -345,6 +442,25 @@ module big32_soc2 #(
             dev_rdata = plic_rdata(d_addr_w);
         end else if (in_virtio) begin
             dev_rdata = virtio_rdata(d_addr_w);
+        end else if (in_net) begin
+            case (d_addr_w[3:0])
+                4'h0: dev_rdata = 32'b0; // TX_DATA is write-only
+                4'h4: dev_rdata = net_rx_ready_w ?
+                       {24'b0, net_rx_fifo[net_rx_head]} : 32'hFFFFFFFF;
+                4'h8: dev_rdata = {30'b0, net_tx_notfull_w, net_rx_ready_w};
+                default: dev_rdata = 32'b0;
+            endcase
+        end else if (in_fb) begin
+            dev_rdata = (d_addr_w[1:0] == 2'd0) ? vramw[fb_idx] : 32'b0;
+        end else if (in_pix) begin
+            dev_rdata = (d_addr_w[1:0] == 2'd0) ? pixw[pix_idx] : 32'b0;
+        end else if (in_ptr) begin
+            case (d_addr_w[3:0])
+                4'h0: dev_rdata = ptr_x_w;
+                4'h4: dev_rdata = ptr_y_w;
+                4'h8: dev_rdata = {31'b0, ptr_btn_w};
+                default: dev_rdata = 32'b0;
+            endcase
         end else begin
             dev_rdata = 32'b0;
         end
@@ -394,7 +510,19 @@ module big32_soc2 #(
                 32'h004: virtio_rdata = 32'd2;        // version
                 32'h008: virtio_rdata = 32'd2;        // block
                 32'h00C: virtio_rdata = 32'h42494733; // "BIG3"
-                32'h010: virtio_rdata = 32'd0;        // features
+                // Device features, selected by v_feat_sel (write
+                // to 0x014): sel=0 -> low word (no legacy block
+                // features offered); sel=1 -> high word bit 0 =
+                // VIRTIO_F_VERSION_1 (bit 32 of the 64-bit
+                // feature word). The Linux virtio-mmio driver
+                // (vm_get_features: sel=1 first, then sel=0)
+                // refuses a version-2 device without this bit
+                // (probe -EINVAL, no /dev/vda), so it must be
+                // advertised. No other feature bit is offered:
+                // the driver then uses only the default block
+                // behaviour, which the FSM already implements.
+                32'h010: virtio_rdata =
+                    (v_feat_sel == 32'd1) ? 32'h00000001 : 32'd0;
                 32'h020: virtio_rdata = v_drv_feat;
                 32'h030: virtio_rdata = v_queue_sel;
                 32'h034: virtio_rdata = 32'd64;       // QueueNumMax
@@ -458,6 +586,12 @@ module big32_soc2 #(
             u16550_dll <= 8'b0; u16550_dlm <= 8'b0;
             u16550_head <= 4'b0; u16550_tail <= 4'b0;
             u16550_count <= 5'b0;
+            rx_head <= 4'b0; rx_tail <= 4'b0; rx_count <= 5'b0;
+            net_tx_head <= 6'b0; net_tx_tail <= 6'b0;
+            net_tx_count <= 7'b0;
+            net_rx_head <= 6'b0; net_rx_tail <= 6'b0;
+            net_rx_count <= 7'b0;
+            net_tx_valid_r <= 1'b0;
             u16550_tx <= 8'b0; u16550_tx_valid <= 1'b0;
             plic_prio[1] <= 3'd0; plic_prio[2] <= 3'd0;
             plic_prio[3] <= 3'd0;
@@ -524,6 +658,83 @@ module big32_soc2 #(
                     default: begin end
                 endcase
             end
+            // ---- Legacy UART RX FIFO I/O ----------------------------
+            begin : rx_fifo_io
+                reg push, pop;
+                push = rx_valid && (rx_count != 5'd16);
+                pop = rx_pop_w && rx_ready_w;
+                case ({push, pop})
+                    2'b10: begin
+                        rx_fifo[rx_tail] <= rx_data;
+                        rx_tail <= rx_tail + 4'd1;
+                        rx_count <= rx_count + 5'd1;
+                    end
+                    2'b01: begin
+                        rx_head <= rx_head + 4'd1;
+                        rx_count <= rx_count - 5'd1;
+                    end
+                    2'b11: begin
+                        rx_fifo[rx_tail] <= rx_data;
+                        rx_tail <= rx_tail + 4'd1;
+                        rx_head <= rx_head + 4'd1;
+                    end
+                    default: begin end
+                endcase
+            end
+            // ---- Network device FIFOs -------------------------------
+            begin : net_fifo_io
+                reg push, pop;
+                push = (net_rx_valid === 1'b1) && (net_rx_count != 7'd64);
+                pop = mem_load_w && (d_addr_w == (NET_BASE + 32'h4)) &&
+                      net_rx_ready_w;
+                case ({push, pop})
+                    2'b10: begin
+                        net_rx_fifo[net_rx_tail] <= net_rx_data;
+                        net_rx_tail <= net_rx_tail + 6'd1;
+                        net_rx_count <= net_rx_count + 7'd1;
+                    end
+                    2'b01: begin
+                        net_rx_head <= net_rx_head + 6'd1;
+                        net_rx_count <= net_rx_count - 7'd1;
+                    end
+                    2'b11: begin
+                        net_rx_fifo[net_rx_tail] <= net_rx_data;
+                        net_rx_tail <= net_rx_tail + 6'd1;
+                        net_rx_head <= net_rx_head + 6'd1;
+                    end
+                    default: begin end
+                endcase
+            end
+            begin : net_tx_io
+                reg push, drain;
+                push = d_we_w && (d_addr_w == NET_BASE) &&
+                       net_tx_notfull_w;
+                drain = (net_tx_count != 7'd0);
+                case ({push, drain})
+                    2'b10: begin
+                        net_tx_fifo[net_tx_tail] <= d_wdata_w[7:0];
+                        net_tx_tail <= net_tx_tail + 6'd1;
+                        net_tx_count <= net_tx_count + 7'd1;
+                        net_tx_valid_r <= 1'b0;
+                    end
+                    2'b01: begin
+                        net_tx_r <= net_tx_fifo[net_tx_head];
+                        net_tx_valid_r <= 1'b1;
+                        net_tx_head <= net_tx_head + 6'd1;
+                        net_tx_count <= net_tx_count - 7'd1;
+                    end
+                    2'b11: begin
+                        net_tx_fifo[net_tx_tail] <= d_wdata_w[7:0];
+                        net_tx_tail <= net_tx_tail + 6'd1;
+                        net_tx_r <= net_tx_fifo[net_tx_head];
+                        net_tx_valid_r <= 1'b1;
+                        net_tx_head <= net_tx_head + 6'd1;
+                    end
+                    default: begin
+                        net_tx_valid_r <= 1'b0;
+                    end
+                endcase
+            end
             // ---- Core data writes -----------------------------------
             if (d_we_w) begin
                 if (in_ram) begin
@@ -534,6 +745,16 @@ module big32_soc2 #(
                                      (st_data64[31:0] & st_mask0);
                     memw[st_widx1] <= (memw[st_widx1] & ~st_mask1) |
                                       (st_data64[63:32] & st_mask1);
+                end else if (in_fb) begin
+                    // VRAM word stores only; byte/halfword
+                    // stores are ignored (the language only
+                    // emits word stores via poke32 anyway).
+                    if (d_wmask_w == 4'b1111 && d_addr_w[1:0] == 2'd0)
+                        vramw[fb_idx] <= d_wdata_w;
+                end else if (in_pix) begin
+                    // Same word-store-only rule for pixels.
+                    if (d_wmask_w == 4'b1111 && d_addr_w[1:0] == 2'd0)
+                        pixw[pix_idx] <= d_wdata_w;
                 end else if (d_addr_w == 32'h02004000) begin
                     if (d_wmask_w[0]) mtimecmp_r[7:0] <= d_wdata_w[7:0];
                     if (d_wmask_w[1]) mtimecmp_r[15:8] <= d_wdata_w[15:8];
@@ -607,8 +828,26 @@ module big32_soc2 #(
             // ---- Virtio FSM ------------------------------------------
             case (v_state)
                 V_IDLE: begin
-                    if (v_notify_q && v_queue_ready &&
-                        (v_status[2] == 1'b1)) begin
+                    // Attempt 18 Step 16: drain, don't idle.
+                    // Before this fix the only trigger was a
+                    // fresh kick, and V_USED returned here, so
+                    // one kick processed exactly one chain --
+                    // the 210M kernel park (4 queued reads,
+                    // avail 9 > last_avail 5, no kick pending)
+                    // had no completer. Now V_IDLE also
+                    // re-enters V_RD_AVAIL while last_avail
+                    // trails the last-read avail idx, so one
+                    // kick drains every chain queued at kick
+                    // time, and a resumed model whose avail
+                    // idx was already read (the 210M case)
+                    // drains without any new kick. This cannot
+                    // busy-poll: V_RD_AVAIL returns to V_IDLE
+                    // exactly when last_avail == avail idx,
+                    // which also falsifies this condition.
+                    if (v_queue_ready &&
+                        (v_status[2] == 1'b1) &&
+                        (v_notify_q ||
+                         (v_last_avail != v_avail_idx))) begin
                         v_notify_q <= 1'b0;
                         v_rd_addr <= v_drv_idx;
                         v_state <= V_RD_AVAIL;
