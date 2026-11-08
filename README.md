@@ -1,12 +1,76 @@
 # big32 — a 32-bit RISC-V CPU, built from zero
 
-A single-cycle RV32IMAC core in Verilog, with a Python model that runs
-the same programs, a two-pass assembler, and a tiny OS kernel that
-runs on it. This is v7 (core/memory split for synthesis). It is a
-complete little computer — and it is still NOT a Linux machine (see
-"Why this is not Linux yet" below).
+A 32-bit RISC-V CPU built from zero: a pipelined RV32IMAC core
+(with its single-cycle sibling), a Python model that runs the
+same programs, a two-pass assembler, a tiny OS kernel — and,
+since Phase 5, a real Linux boot. Linux 6.6.52 rv32 boots on
+this CPU in Icarus Verilog simulation, mounts a root filesystem
+from a virtio block device, runs `/init` as PID 1, and drops
+into a working shell. This README is the honest state as of
+8 Nov 2026. The full evidence, step by step, is in
+[`LINUX_BOOT.md`](LINUX_BOOT.md).
+
+## Status — 8 Nov 2026
+
+| Phase | What | State |
+|---|---|---|
+| 1 | 5-stage pipelined core, same semantics as the v7 single-cycle core | Done |
+| 2–3 | M/S/U privilege, interrupts, Sv32 MMU, unified-memory SOC | Done |
+| 4 | SBI-style M firmware, S-mode kernel, U-mode user program | Done |
+| 5 | SOC2: SBI firmware, device tree, PLIC, 16550 UART, 64-bit CLINT, virtio-blk, TLB, A/D bits | Done |
+| 5 | Linux 6.6.52 boots to a working shell (skip-jent config) | **Proven** — Step 26 |
+| 5 | Same boot, full unmodified kernel config | **Open** — grind at 250M, Step 28 |
+
+**The shell is proven, not just booted.** Step 26 (6 Nov 2026)
+resumed the boot from a 210M-cycle checkpoint and drove the
+shell with a clean feed at 225M cycles. In order:
+
+```
+bare cat        -> cat: missing file
+bare echo       -> (a bare newline, nothing else)
+echo hello      -> hello
+cat /hello.txt  -> Hello from the big32 root filesystem.
+```
+
+Bare `ls` lists the root (Step 24), and `uname` and `pwd`
+work too. The whole log has zero "cannot open directory",
+zero "Kernel panic", zero "Oops". That boot used the
+skip-jent configuration (see below) — the shell, the root
+filesystem, and every command in it are real; the
+configuration is the only qualifier.
+
+**The full-config boot is the one open question.** The
+unmodified kernel gets stuck early in `jent_mod_init` —
+jitterentropy initialisation, 1,124 rounds of SHA3 hashing
+to collect randomness. On real hardware that is instant;
+in this simulation each CPU cycle costs real wall time
+(~36 minutes per 10M cycles), so the kernel sits inside
+that one function for hours. It is not crashed and not
+wedged — the CPU state keeps changing between
+checkpoints, and the log has zero panics — but nothing
+after it can happen (no console, no disk, no root mount,
+no prompt) until it finishes. Steps 27–28 ground it
+170M → 250M cycles in 10M segments; the 250M checkpoint
+is banked (8 Nov 2026, 18:03 IST) as the resume point.
+On 8 Nov Jayant authorized extending the grind past 250M
+with no cap, until jent finishes (Step 29, from the banked
+250M checkpoint) — so the grind continues; the only thing
+standing between it and the prompt is cycles.
+What full-config proof would mean: the stock kernel
+boots with nothing blacklisted. What the skip-jent proof
+already banked means: everything downstream of jent
+works — the only thing unproven is jent itself finishing.
+
+Simulation only, throughout: Icarus Verilog 12.0. Not
+silicon, not production-ready, no CI, no RISCOF
+compliance, no formal verification. No badges here
+because there is nothing to badge.
 
 ## What it is
+
+The instruction set below is the v7 single-cycle core's.
+The pipelined core in `src/big32_core_pipe.v` keeps its
+exact semantics — see "Pipelined core (Phase 1)".
 
 - 32 registers x0..x31 (x0 hardwired to 0), 32-bit program counter.
 - Single-cycle: fetch, decode, execute, memory, writeback in one clock.
@@ -99,29 +163,69 @@ done
 Honest limits, same as the Forge side: simulation only, subset
 language (int/bool/str/arrays, loops, functions — no float,
 structs, threads, file I/O, network, or GC on big32), native
-RISC-V arithmetic (wrapping, div by zero → -1), and no Linux.
-The full backend contract is documented in the Forge README's
-"Forge on big32" section.
+RISC-V arithmetic (wrapping, div by zero → -1), and the demo
+runs on the bare core, not under Linux. The full backend
+contract is documented in the Forge README's "Forge on big32"
+section.
 
 ## Files
 
 - `src/big32_core.v` — the CPU core alone (v7, no memories)
-- `src/big32.v` — simulation top: core + instruction/data memories
+- `src/big32.v` — simulation top for the single-cycle core:
+  core + instruction/data memories
+- `src/big32_core_pipe.v` — the pipelined core (Phase 1),
+  same semantics as the v7 core
+- `src/big32_pipe.v` — simulation top for the pipelined core
+- `src/big32_soc.v` — SOC top for Phases 2–4 (M/S/U, MMU,
+  interrupts, unified memory)
+- `src/big32_soc2.v` — SOC top for Phase 5 (Linux platform:
+  PLIC, 16550 UART, 64-bit CLINT, virtio-blk, TLB)
 - `tools/asm.py` — RISC-V assembler (labels, R/I/S/B/U/J/A/CSR
   encodings, la, character literals)
 - `tools/model.py` — Python behavioural model, cross-checks the Verilog
 - `tools/rand_test.py` — random differential tester (see below)
+- `tools/rand_pipe_test.py` — random tester for the pipelined core
+- `tools/pipe_check.py`, `tools/soc_check.py`, `tools/os_check.py`,
+  `tools/soc2_check.py`, `tools/sbi_check.py`, `tools/check_dtb.py`,
+  `tools/boot_check.py`, `tools/coregaps_check.py` — the
+  per-phase checkers the `./run_*.sh` runners call
+- `tools/build_kboot.py`, `tools/build_kboot_dtb.py`,
+  `tools/build_sbi.py`, `tools/build_smode.py`,
+  `tools/build_os.py`, `tools/img2hex.py`, `tools/soc_asm.py`
+  — kernel/DTB/SBI/image builders
+- `tools/run_cont170_220.sh`, `tools/run_cont220_250.sh`,
+  `tools/step28_watch.sh`, `tools/run_catecho_cont230.sh`,
+  `tools/run_skipjent*.sh`, `tools/ckpt_run.sh` — the
+  checkpoint/resume boot runners and watchers used in
+  [`LINUX_BOOT.md`](LINUX_BOOT.md) Steps 22–28
 - `programs/` — sum, fib, mul_loop, call_demo, mul_demo, mulh_demo,
   div_demo, div_edge, div_zero, rem_zero, amo_demo, sc_fail,
-  csr_demo, edge_cases, kernel (each .s with its assembled .hex)
-- `programs/forge_os.s` / `programs/forge_os.hex` — Forge OS demo
-  (generated by Forge's big32 backend; see "Forge on big32" above)
-- `tools/run_forge.py` — run a Forge-generated `.hex` in the model
-  and in Verilog, printing both UART transcripts
-- `sim/tb_big32.v` — testbench, prints PASS/FAIL per program and
-  captures the kernel's UART output
-- `sim/tb_rand.v` — testbench for the random tester
-- `sim/synth_test.v` — synthesis wrapper instantiating the core alone
+  csr_demo, edge_cases, pipe_hazards, kernel (each .s with its
+  assembled .hex), plus `forge_os` (see above) and the
+  `rand_*` differential-test programs
+- `os_programs/` — SBI firmware (`sbi_firmware.s`), device tree
+  (`big32.dts`), bootloader (`bootloader.s`), S-mode kernel
+  (`kernel_s.s`), user program (`user.s`), and the Phase 4
+  firmware/kernel/user sources
+- `soc_programs/` — Phase 2–3 SOC test programs
+- `soc2_programs/` — Phase 5 SOC2 test programs (misalign,
+  entry/drain, fault, virtio)
+- `soc2_hex/` — Phase 5 hex images: SBI firmware
+  (`kboot_fw.hex`), device trees (full-config and
+  skip-jent variants, 2/10 MHz), and the root-filesystem
+  disk image (`rootfs_disk.hex`)
+- `rootfs/` — the root filesystem: `init.asm` (the shell,
+  3440 bytes), `mkelf.py` (the ELF builder), `rootfs.img`
+  (the 1 MiB ext4 image), `hello.txt`, and the RX feed
+  files (`rx_cmds.txt`, `rx_catecho.txt`, `rx_lsfix.txt`)
+  used to drive the shell in the boot attempts
+- `sim/` — testbenches: `tb_big32.v`, `tb_pipe.v`,
+  `tb_rand.v`, `tb_soc.v`, `tb_soc2.v`, the checkpoint
+  testbenches (`tb_kboot_ckpt*.v`, `tb_kboot_trace*.v`,
+  `tb_kboot_fine.v`), and `synth_test.v`
+- `LINUX_BOOT.md` — the full Linux boot record, Steps 1–28
+- `OS_BOOT.md`, `PIPELINE.md`, `PRIVILEGE_MMU.md` — the
+  Phase 4, Phase 1, and Phases 2–3 design docs
 
 ## Interrupts, privilege, MMU (Phases 2 and 3)
 
@@ -135,8 +239,9 @@ memory map, deviations from the privileged specification, and
 test results are in
 [`PRIVILEGE_MMU.md`](PRIVILEGE_MMU.md). Re-run with
 `./run_soc.sh` (11/11 SOC checks, then the Phase 1 pipe suite
-as regression). Still simulation only: no Linux/xv6 boot, no
-RISCOF, no formal verification, no silicon.
+as regression). Still simulation only: no RISCOF, no formal
+verification, no silicon. Linux now boots on the Phase 5
+SOC2 top — see below.
 
 ## OS boot (Phase 4)
 
@@ -144,15 +249,18 @@ M-mode firmware delegates traps to an S-mode kernel, which
 enables Sv32 translation, counts CLINT timer ticks, drops to
 U-mode, serves print/exit syscalls, demand-maps a faulting
 page, and shuts down cleanly through the firmware — with the
-full UART boot transcript checked byte-for-byte. No xv6 or
-Linux boots here (xv6-riscv is RV64/Sv39; see the assessment
-in the doc). Full design, delegation table, memory map,
-syscall ABI, transcript, xv6 blockers, and the Linux roadmap
-are in [`OS_BOOT.md`](OS_BOOT.md). Re-run with `./run_os.sh`
+full UART boot transcript checked byte-for-byte. Full design,
+delegation table, memory map, syscall ABI, transcript, xv6
+blockers, and the Linux roadmap are in
+[`OS_BOOT.md`](OS_BOOT.md). Re-run with `./run_os.sh`
 (OS boot check, then `./run_soc.sh` as regression). This phase
 also fixed a latent core bug: S interrupt delivery now
 requires the source to actually be pending (previously, merely
 enabling an S interrupt took a phantom interrupt forever).
+xv6-riscv is NOT an intermediate step here: it is RV64/Sv39
+and cannot run on this RV32/Sv32 core (see OS_BOOT.md).
+RV32 Linux, by contrast, is architecturally possible — and
+Phase 5 proves it boots.
 
 ## Linux platform (Phase 5)
 
@@ -173,13 +281,16 @@ INSTRET counters (the kernel clocksource reads rdtime),
 and misaligned accesses now trap (causes 4/6) instead of
 silently continuing into the next physical page. Tests:
 `./run_soc2.sh` (soc2 + coregaps + sbi + dtb + boot +
-the full Phase 1–4 regression). **Linux 6.6.52 boots
-and prints on big32 in simulation** (SBI probed, DTB
-parsed, earlycon on the 16550, memory/SLUB/IRQ init
-reached — see the full log in
-[`LINUX_BOOT.md`](LINUX_BOOT.md)); userspace is NOT
-reached yet (no root filesystem is provided), and the
-exact remaining blockers are listed there.
+the full Phase 1–4 regression).
+
+**Linux 6.6.52 rv32 boots on big32 in simulation and
+reaches userspace.** SBI probed, DTB parsed, earlycon on
+the 16550, memory/SLUB/IRQ init, virtio-blk probed, root
+mounted (ext4), `Run /init as init process`, PID 1 up,
+shell prompt `big32#` — see the full log in
+[`LINUX_BOOT.md`](LINUX_BOOT.md), Steps 22–26. The
+remaining open item is the full-config boot (Step 28,
+250M, jent still grinding) — see "Status" above.
 
 ## Pipelined core (Phase 1)
 
@@ -195,8 +306,9 @@ cycle-count table, and test results are in
 (16/16 directed checks with full register/UART/memory
 comparison, 50/50 hazard-heavy random tests — plus a second
 50/50 batch on fresh seeds). The v7 files are untouched and
-v7 still passes its full suite. Still M-mode only, still
-simulation only: no S/U modes, MMU, interrupts, or Linux yet.
+v7 still passes its full suite. This pipelined core is the
+one the SOC tops run — S/U modes, the MMU, interrupts, and
+Linux all sit on it, not on the single-cycle core.
 
 ## Production hardening (v4)
 
@@ -316,7 +428,8 @@ yosys -Q -T -l /tmp/yosys_v7.log -p 'read_verilog src/big32_core.v; hierarchy -t
 ```
 
 RESULT (Yosys 0.33, 26 Oct 2026, run took 225 seconds, exit code
-0, full log in `yosys_v7.log` in this directory):
+0; the log itself is not in this repo, the numbers below are the
+run's recorded result):
 
 ```
 === big32_core ===
@@ -377,7 +490,7 @@ python3 tools/rand_test.py 50 0   # random differential tests, model vs Verilog
 ```
 
 Verified 26 Oct 2026 in both the Python model and Icarus Verilog
-simulation on all 14 programs — sum = 55, fib = 55, mul_loop = 42,
+simulation on all 15 programs — sum = 55, fib = 55, mul_loop = 42,
 call_demo = 112 with sp restored, all six M cases, amo_demo = 42,
 sc_fail = 101, csr_demo = 4660, and the kernel's UART output above,
 halting with sp restored to 65532. One real bug was caught by the
@@ -388,54 +501,92 @@ v4 adds 50/50 random differential tests passing (see above). v5
 keeps all 15 directed programs passing (edge_cases a0 = 0) and
 re-runs the random suite on the new core.
 
-## What remains before a usable Linux system — honest roadmap (updated after Phase 5)
+Per phase:
 
-Linux on RISC-V needs, at minimum, all of the following. Status
-as of the Linux-capable phases (see PIPELINE.md, PRIVILEGE_MMU.md,
-OS_BOOT.md for the evidence):
+```sh
+./run_pipe.sh   # Phase 1: pipelined core, directed + random
+./run_soc.sh    # Phases 2–3: SOC checks + Phase 1 regression
+./run_os.sh     # Phase 4: OS boot transcript + full regression
+./run_soc2.sh   # Phase 5: SOC2 platform + full Phase 1–4 regression
+```
 
-1. **M extension** — DONE in v2 (divider now multi-cycle in the
-   pipelined core, Phase 1).
-2. **A extension** — DONE in v3 (word atomics, single core).
-3. **Privileged architecture** — DONE in Phases 2–3: M/S/U modes,
-   trap delegation, sret/mret, interrupts (CLINT timer, external
-   line, UART RX interrupt), and a working S-mode kernel with a
-   U-mode user program (Phase 4).
-4. **MMU (Sv32)** — DONE in Phase 3: two-level page-table walker
-   (multi-cycle, no TLB), unified-memory SOC top, page faults
-   with correct causes and tval.
-5. **Peripherals** — DONE in Phase 5: a real PLIC, a
-   virtio-mmio block device (so a root filesystem path
-   exists), a 16550-compatible UART, and a 64-bit CLINT
-   timer. Still no network device and no FPU/PMP.
-6. **Much more memory + bootloader** — DONE for the
-   attempt: SOC2 RAM is parameterisable (1 MiB default,
-   64 MiB for the kernel attempt via the testbench's
-   `-Ptb_soc2.TB_MEM_BYTES`), at the Linux-compatible
-   address 0x80000000, with an SBI firmware and a device
-   tree. The bootloader loads only 2 sectors (1024
-   bytes) from virtio — a real kernel needs thousands
-   of sectors, so the boot attempt loads the Image
-   directly through the testbench (+KIMGBIN, binary)
-   as a documented test-harness shortcut. The kernel
-   Image builds (rv32, no C/FPU/SMP, trimmed) and
-   boots to early printk on big32 (see LINUX_BOOT.md
-   for the log, including the 4MB-alignment fix and
-   the PLIC/context DTB fix found from the boot log).
+## Reproducing the Linux boot — and what is NOT in this repo
 
-What is still missing, in order: a root filesystem
-with an init (without it the kernel stops at the "no
-working init" panic), a faster simulator or FPGA (Icarus
-at ~0.15 ms/cycle cannot boot Linux end-to-end in a
-session), a bootloader sector loop for multi-megabyte
-images (so the testbench shortcut is no longer needed),
-a boot with the fixed PLIC/context DTB (source fixed,
-boot untested), and FPU/PMP/RISCOF/formal claims —
-none made here. xv6-riscv is NOT an intermediate step
-here: it is RV64/Sv39 and cannot run on this RV32/Sv32
-core (see OS_BOOT.md). RV32 Linux, by contrast, is
-architecturally possible — it is blocked by the missing
-pieces above, not by word size.
+Everything needed to reproduce the boot is in this repo
+except the two things that cannot live here:
+
+- **The kernel Image is not in the repo.** The boot used a
+  Linux 6.6.52 rv32 Image, built trimmed (no C/FPU/SMP)
+  per the config in [`LINUX_BOOT.md`](LINUX_BOOT.md).
+  Build it, point the testbench at it with `+KIMGBIN`,
+  and the firmware, device tree, disk image, and shell in
+  this repo do the rest.
+- **No checkpoints, no compiled testbenches, no run logs.**
+  The `ckpt_*` checkpoint sets (~15G), the 2.1G kernel
+  build tree, the `.vvp` binaries, and the `kernel/*.log`
+  run logs are not in the repo. The boot is reproduced
+  from source, not replayed from a checkpoint: compile
+  `sim/tb_kboot_ckpt.v` against `src/big32_core_pipe.v`
+  and `src/big32_soc2.v` with the `+HEX`, `+DISKHEX`,
+  `+DTBFILE`, and `+KIMGBIN` plusargs documented in
+  [`LINUX_BOOT.md`](LINUX_BOOT.md) — or run the
+  checkpoint runners in `tools/` (`run_cont220_250.sh`
+  and friends) against your own checkpoint sets.
+  One 87MB file was deliberately left out of the push:
+  `soc2_hex/kernel.hex` is an orphan nothing references.
+
+What IS in the repo, and enough to rebuild the boot:
+SBI firmware, device trees (full-config and skip-jent),
+`kboot_fw.hex`, `rootfs_disk.hex`, `rootfs.img` with the
+shell, and the full step-by-step record in
+[`LINUX_BOOT.md`](LINUX_BOOT.md). The boot is slow in
+Icarus (~36 minutes per 10M cycles at the grind's pace)
+— that is the simulator, not the CPU; a faster simulator
+or an FPGA is on the roadmap below.
+
+## Honest roadmap
+
+Done, in order: M extension (v2), A extension (v3),
+M-mode CSRs/traps + UART + tiny kernel (v3), 5-stage
+pipeline (Phase 1), interrupts, S/U modes, Sv32 MMU,
+unified memory (Phases 2–3), M-firmware + S-kernel +
+U user program (Phase 4), SBI firmware + device tree +
+PLIC + 16550 UART + 64-bit timer + virtio block +
+bootloader + TLB/A-D/misaligned gaps (Phase 5), RV32
+Linux kernel built and booted in simulation (Phase 5),
+root filesystem with an init, and the shell proven
+(Steps 22–26).
+
+Still missing, in order:
+
+1. **The full-config boot.** The stock kernel, nothing
+   blacklisted, finishing `jent_mod_init` and reaching
+   the prompt. Ground to 250M so far (Step 28); extension
+   past 250M authorized with no cap (Step 29). The only
+   thing standing between it and the prompt is cycles.
+2. **A bootloader sector loop for multi-megabyte images.**
+   The bootloader loads only 2 sectors (1024 bytes);
+   the kernel Image is currently loaded through the
+   testbench (`+KIMGBIN`) as a documented shortcut.
+3. **A faster simulator or an FPGA.** Icarus at ~36
+   minutes per 10M cycles cannot boot Linux end-to-end
+   in a session; every long boot is checkpointed in
+   10M-cycle segments.
+4. **A network device.** Virtio-net, or any NIC — the
+   platform has block and serial only.
+5. **FPU / PMP.** No floating-point unit, no physical
+   memory protection.
+6. **RISCOF compliance, formal (RVFI) checks, CI.**
+   The production-core pattern from "What the
+   production cores do" — still not claimed, still
+   the next production steps.
+7. **Synthesis numbers for the pipelined core.** The
+   v7 numbers above are the single-cycle core only.
+
+xv6-riscv is NOT an intermediate step here: it is
+RV64/Sv39 and cannot run on this RV32/Sv32 core
+(see OS_BOOT.md). RV32 Linux, by contrast, is
+architecturally possible — and it boots.
 
 ## Next steps (in order)
 
@@ -450,7 +601,10 @@ pieces above, not by word size.
 2. ~~Build an RV32 Linux kernel and boot it in
    simulation~~ — done in Phase 5 (boots and prints;
    see LINUX_BOOT.md for the log and the exact state).
-3. Next: root filesystem with an init, a boot with the
-   fixed PLIC/context DTB, a bootloader sector loop
-   for multi-megabyte images, and faster
-   simulation/FPGA — then the remaining gaps.
+3. ~~Root filesystem with an init, shell proven~~ —
+   done, Steps 22–26 (bare `ls`, `cat`, `echo`,
+   `uname`, `pwd` all verified at the prompt).
+4. Next: the full-config boot (grind past 250M authorized
+   with no cap — Step 29), a bootloader sector loop for
+   multi-megabyte images, and faster simulation/FPGA — then
+   the remaining gaps above.
