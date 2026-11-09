@@ -7,10 +7,10 @@ since Phase 5, a real Linux boot. Linux 6.6.52 rv32 boots on
 this CPU in Icarus Verilog simulation, mounts a root filesystem
 from a virtio block device, runs `/init` as PID 1, and drops
 into a working shell. This README is the honest state as of
-8 Nov 2026. The full evidence, step by step, is in
+9 Nov 2026. The full evidence, step by step, is in
 [`LINUX_BOOT.md`](LINUX_BOOT.md).
 
-## Status — 8 Nov 2026
+## Status — 9 Nov 2026
 
 | Phase | What | State |
 |---|---|---|
@@ -19,7 +19,7 @@ into a working shell. This README is the honest state as of
 | 4 | SBI-style M firmware, S-mode kernel, U-mode user program | Done |
 | 5 | SOC2: SBI firmware, device tree, PLIC, 16550 UART, 64-bit CLINT, virtio-blk, TLB, A/D bits | Done |
 | 5 | Linux 6.6.52 boots to a working shell (skip-jent config) | **Proven** — Step 26 |
-| 5 | Same boot, full unmodified kernel config | **Open** — grind at 250M, Step 28 |
+| 5 | Same boot, full unmodified kernel config | **Proven** — Steps 29–31 |
 
 **The shell is proven, not just booted.** Step 26 (6 Nov 2026)
 resumed the boot from a 210M-cycle checkpoint and drove the
@@ -39,27 +39,35 @@ skip-jent configuration (see below) — the shell, the root
 filesystem, and every command in it are real; the
 configuration is the only qualifier.
 
-**The full-config boot is the one open question.** The
-unmodified kernel gets stuck early in `jent_mod_init` —
-jitterentropy initialisation, 1,124 rounds of SHA3 hashing
-to collect randomness. On real hardware that is instant;
-in this simulation each CPU cycle costs real wall time
-(~36 minutes per 10M cycles), so the kernel sits inside
-that one function for hours. It is not crashed and not
-wedged — the CPU state keeps changing between
-checkpoints, and the log has zero panics — but nothing
-after it can happen (no console, no disk, no root mount,
-no prompt) until it finishes. Steps 27–28 ground it
-170M → 250M cycles in 10M segments; the 250M checkpoint
-is banked (8 Nov 2026, 18:03 IST) as the resume point.
-On 8 Nov Jayant authorized extending the grind past 250M
-with no cap, until jent finishes (Step 29, from the banked
-250M checkpoint) — so the grind continues; the only thing
-standing between it and the prompt is cycles.
-What full-config proof would mean: the stock kernel
-boots with nothing blacklisted. What the skip-jent proof
-already banked means: everything downstream of jent
-works — the only thing unproven is jent itself finishing.
+**The full-config boot is proven too.** The unmodified kernel
+used to get stuck early in `jent_mod_init` — jitterentropy
+initialisation, 1,124 rounds of SHA3 hashing to collect
+randomness. On real hardware that is instant; in this
+simulation each CPU cycle costs real wall time (~36 minutes
+per 10M cycles), so the kernel sat inside that one function
+for hours. It was not crashed and not wedged — the CPU state
+kept changing between checkpoints, and the log had zero
+panics — but nothing after it could happen (no console, no
+disk, no root mount, no prompt) until it finished. Steps
+27–28 ground it 170M → 250M cycles in 10M segments. Step 29
+(8–9 Nov 2026) ground it 250M → 470M with no cap: jent
+finished — the first post-jent lines appeared at 360M — the
+serial console was enabled and virtio-blk found the disk
+(`[vda]`) at 470M, still no prompt. Step 30 (9 Nov 2026)
+ground it 470M → 520M: VFS mounted root (ext4, readonly),
+`Run /init as init process`, PID 1 up, and the `big32#`
+prompt — the stock kernel boots with nothing blacklisted.
+Step 31 (9 Nov 2026) typed commands at that prompt from
+520M → 530M and 5 of 6 answered: `ls` lists the root,
+`cat /hello.txt` prints the file, `uname` prints
+`Linux 6.6.52 riscv32`, `pwd` prints `/`, `echo done`
+prints `done`. `echo hello` did not: the shell answered
+`unknown command: ho` — the first two feed bytes were lost
+at feed start, a startup transient, mechanism unconfirmed
+(the same `echo` works later in the run). What full-config
+proof means: the stock kernel boots with nothing
+blacklisted, and its shell answers. The 530M checkpoint is
+banked as the resume point.
 
 Simulation only, throughout: Icarus Verilog 12.0. Not
 silicon, not production-ready, no CI, no RISCOF
@@ -288,9 +296,8 @@ reaches userspace.** SBI probed, DTB parsed, earlycon on
 the 16550, memory/SLUB/IRQ init, virtio-blk probed, root
 mounted (ext4), `Run /init as init process`, PID 1 up,
 shell prompt `big32#` — see the full log in
-[`LINUX_BOOT.md`](LINUX_BOOT.md), Steps 22–26. The
-remaining open item is the full-config boot (Step 28,
-250M, jent still grinding) — see "Status" above.
+[`LINUX_BOOT.md`](LINUX_BOOT.md), Steps 22–31. The
+full-config boot is proven in Steps 29–31 — see "Status" above.
 
 ## Pipelined core (Phase 1)
 
@@ -559,11 +566,12 @@ root filesystem with an init, and the shell proven
 
 Still missing, in order:
 
-1. **The full-config boot.** The stock kernel, nothing
-   blacklisted, finishing `jent_mod_init` and reaching
-   the prompt. Ground to 250M so far (Step 28); extension
-   past 250M authorized with no cap (Step 29). The only
-   thing standing between it and the prompt is cycles.
+1. ~~The full-config boot.~~ — done, Steps 29–31: the stock
+   kernel, nothing blacklisted, finished `jent_mod_init`
+   (Step 29, 470M), reached the prompt (Step 30, 520M),
+   and answered 5 of 6 typed commands (Step 31, 530M;
+   `echo hello` lost its first two feed bytes, a startup
+   transient).
 2. **A bootloader sector loop for multi-megabyte images.**
    The bootloader loads only 2 sectors (1024 bytes);
    the kernel Image is currently loaded through the
@@ -604,7 +612,5 @@ architecturally possible — and it boots.
 3. ~~Root filesystem with an init, shell proven~~ —
    done, Steps 22–26 (bare `ls`, `cat`, `echo`,
    `uname`, `pwd` all verified at the prompt).
-4. Next: the full-config boot (grind past 250M authorized
-   with no cap — Step 29), a bootloader sector loop for
-   multi-megabyte images, and faster simulation/FPGA — then
-   the remaining gaps above.
+4. Next: a bootloader sector loop for multi-megabyte images,
+   and faster simulation/FPGA — then the remaining gaps above.

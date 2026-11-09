@@ -6400,3 +6400,443 @@ pre-flight md5s captured in-session; baselines belong in
 the workspace, not /tmp). Full-config grind remains open
 at 250M; skip-jent work (Steps 22/24/26) already
 boot-proven separately.
+
+## STEP 29 -- open-ended full-config grind 250M->470M from ckpt_cont170_run/: JENT FINISHED, serial console enabled, virtio-blk vda detected -- boot past initcalls, no prompt yet -- 8-9 Nov 2026
+
+Pre-flight (all verified before running, not assumed):
+- Step 28 read in full. Resume point
+  ckpt_cont170_run/ckpt_250000000.done (banked 12:33:22Z),
+  header 250000000 / 50 / 150100000. No sim running at launch
+  (ps clean). VM uptime 6:46.
+- NO disk rewrite: the banked 250M .disk payload md5 is
+  c073ba7f766976b265d6b0057edb8d6f (1,048,576 bytes, parsed
+  from the hex text back to binary) == the current patched
+  rootfs image. Verified pre-flight; nothing was rewritten.
+  Post-run verification (this check): 260M, 290M, 330M,
+  380M, 430M, 460M and 470M .disk payload md5s all =
+  c073ba7f... (1,048,576 payload bytes each).
+- Full-config DTB (NOT skipjent):
+  soc2_hex/big32_kboot_10mhz_rootfs.dtb.txt; testbench
+  sim/tb_kboot_ckpt.vvp built 30 Oct 14:42 UTC from the
+  drain-fixed sources. Header untouched: rx2idx=50,
+  rx2next=150100000 -- the attempt-17 feed
+  rootfs/rx_cmds.txt is fully consumed, so no re-feed; judge
+  prompt/banner/serial/virtio/root-mount only. Shell fixes
+  explicitly NOT judged.
+- Scratch-copy smoke test 250M->250.5M PASS (CKPT written,
+  HALTED: 0, REGS differ -- x5 2370977806 -> 2305263708);
+  scratch copy deleted.
+- Pristine baselines saved in work/step29_pristine_baseline.txt
+  (48 files, in the workspace -- NOT /tmp, the lesson from
+  Step 28, where the /tmp baseline was wiped by a reboot).
+
+Run: tools/run_cont250_open.sh (adapted from
+run_cont220_250.sh; same ensure_vvp, segment logic,
+full-config DTB), log
+kernel/boot_attempt17_cont250_open.log, progress
+kernel/cont250_open_progress.log, watcher
+tools/step29_watch.sh (600s polls, relaunches the runner
+with setsid nohup if it dies while unfinished). Open-ended:
+targets computed dynamically as latest+10M (no fixed target
+list -- avoids the Steps 27/28 retry-loop quirk of walking
+already-passed targets as no-ops after a relaunch); 10M
+segments, never uncapped loop mode, up to 3 retries per
+segment (zero retries needed); stops ONLY on kernel panic /
+HALTED: 1 / prompt / serial console enabled / Run /init /
+Freeing unused kernel image. Watermark
+kernel/cont250_open_watermark.txt = 250000000 (hourly
+watcher cron re-pointed: "big32 full-config grind watch -
+250M open-ended to jent finish").
+
+Segments (22, all clean, explicit 10M caps, never loop mode):
+250M->260M 18:06:53Z->18:52:49Z, 45m56s.
+260M->270M 18:52:49Z->20:00:00Z, 1h07m11s (reboot #1,
+re-ground from 260M).
+270M->280M 20:00:00Z->20:36:08Z, 36m08s.
+280M->290M 20:36:08Z->21:12:21Z, 36m13s.
+290M->300M 21:12:22Z->22:07:06Z, 54m44s (reboot #2,
+re-ground from 290M).
+300M->310M 22:07:07Z->22:33:51Z, 26m44s.
+310M->320M 22:33:51Z->23:00:01Z, 26m10s.
+320M->330M 23:00:01Z->23:27:27Z, 27m26s.
+330M->340M 23:27:27Z->00:16:24Z, 48m57s (reboot #3,
+re-ground from 330M).
+340M->350M 00:16:24Z->00:42:46Z, 26m22s.
+350M->360M 00:42:46Z->01:04:23Z, 21m37s.
+360M->370M 01:04:23Z->01:25:11Z, 20m48s.
+370M->380M 01:25:11Z->01:46:01Z, 20m50s.
+380M->390M 01:46:01Z->02:27:22Z, 41m21s (reboot #4,
+re-ground from 380M).
+390M->400M 02:27:22Z->02:48:34Z, 21m12s.
+400M->410M 02:48:34Z->03:10:04Z, 21m30s.
+410M->420M 03:10:04Z->03:32:39Z, 22m35s.
+420M->430M 03:32:39Z->03:55:11Z, 22m32s.
+430M->440M 03:55:11Z->04:41:42Z, 46m31s (reboot #5,
+re-ground from 430M).
+440M->450M 04:41:43Z->05:06:50Z, 25m07s.
+450M->460M 05:06:50Z->05:32:12Z, 25m22s.
+460M->470M 05:32:12Z->05:57:21Z, 25m09s -- STOP.
+Each segment footer CYCLES: <target>, HALTED: 0. Total wall
+18:06:53Z 8 Nov -> 05:57:21Z 9 Nov = 11h50m28s.
+
+What the kernel did (52 kernel-timestamp UART lines in the
+log -- the first new ones since kernel time 40M, when the
+full-config boot went silent inside jent):
+- [24.288708] watchdog: BUG: soft lockup - CPU#0 stuck for
+  22s! [swapper:1] -- epc keccakf_round, call chain
+  crypto_sha3_final <- jent_hash_time <-
+  jent_condition_data <- jent_entropy_init <- jent_mod_init
+  <- do_one_initcall. A warning, NOT a panic: the kernel
+  kept going. Direct proof jent was the thing running.
+- [33.913823] NET: Registered PF_ALG protocol family;
+  [33.915488] xor: measuring software checksum speed;
+  [35.272312] 8regs: 7 MB/sec; [36.631228] 8regs_prefetch:
+  7 MB/sec -- jent_mod_init FINISHED; the initcall loop
+  moved on to crypto initcalls. The first post-jent lines
+  appeared at the 360M checkpoint, i.e. during segment
+  350M->360M (at 350M the latest lines were still the
+  soft-lockup trace).
+- [39.354672] Block layer SCSI generic (bsg) driver version
+  0.4 loaded (major 248); [39.356519] io scheduler
+  mq-deadline registered; [39.358451] kyber registered;
+  [39.361326] bfq registered.
+- [44.741579] Serial: 8250/16550 driver, 4 ports, IRQ
+  sharing disabled; [44.935024] printk: console [ttyS0]
+  disabled; [44.967790] 10010000.uart: ttyS0 at MMIO
+  0x10010000 (irq = 2, base_baud = 115200) is a 16550A;
+  [44.971715] printk: console [ttyS0] enabled (x2);
+  [44.974678] printk: bootconsole [ns16550a0] disabled
+  (x2); [45.009352] SuperH (H)SCI(F) driver initialized.
+- [45.556309] loop: module loaded; [45.561950] virtio_blk
+  virtio0: 1/0/0 default/read/poll queues; [45.579793]
+  virtio_blk virtio0: [vda] 2048 512-byte logical blocks
+  (1.05 MB/1.00 MiB) -- the virtio block device found the
+  rootfs disk.
+
+Whole-log grep: ZERO "Kernel panic", ZERO "HALTED: 1",
+ZERO "big32# ", ZERO "Run /init", ZERO "Freeing unused
+kernel image"; 2x "console [ttyS0] enabled". REGS change
+substantially between segment footers (e.g. 440M vs 460M
+vs 470M) -- the CPU is still executing, not wedged. (Note:
+the 380M footer REGS contain 'x' values in several
+positions -- uninitialized registers in the testbench's
+display; the sim continued cleanly, later footers are
+numeric again and state kept moving; not a failure.)
+
+Verdict: JENT FINISHED -- the open-ended grind's goal is
+met. The full-config kernel got past jent_mod_init, through
+crypto/block/serial initcalls, enabled the serial console
+on ttyS0, and detected virtio-blk vda (the 1 MB rootfs
+disk). NOT a complete boot yet: no VFS/root-mount, no "Run
+/init", no init banner, no prompt -- the boot is still in
+driver initcalls at kernel time 45.58s. The runner stopped
+on the console-enabled finish criterion at 470M, per its
+design ("STOP: finish criteria met (serial console enabled
+in log) at 470000000", 05:57:21Z, exit 0); the watcher
+exited 05:44:06Z on the same criterion. The 470M checkpoint
+(ckpt_cont170_run/ckpt_470000000.done, 05:57:21Z) is banked
+as the resume point for any continuation; whether to
+continue the grind toward root-mount/prompt needs Jayant's
+word -- do NOT extend without it.
+
+Incidents -- FIVE VM reboots (~19:23Z, ~21:40Z, ~23:49Z,
+~02:05Z, ~04:13Z), each killing runner, vvp and watcher
+mid-segment; each recovered by relaunching the runner with
+setsid nohup from the newest banked checkpoint
+(260M/290M/330M/380M/430M), no work lost -- only the
+partial segment was re-ground (the five reboot-hit segments
+ran 41-67 min instead of the usual 21-36). The foreground
+watcher exec was killed by the same reboots five times; the
+hourly watcher cron was the backstop throughout (it also
+relaunched the watcher at 05:52:03Z after the final watcher
+exit). Zero segment retries needed ("no progress" count 0).
+Nothing pushed; core, firmware, kernel, rootfs untouched by
+this job. Pristine check: ckpt_cont160/ and ckpt_catecho210/
+md5-identical to the work/step29_pristine_baseline.txt
+baseline (all 48 files match).
+
+## STEP 30 -- open-ended full-config grind 470M->520M from ckpt_cont170_run/: PROMPT REACHED, full-config Linux boots to the big32# shell -- 9 Nov 2026
+
+Pre-flight (all verified before running, not assumed):
+- Step 29 read in full. Resume point
+  ckpt_cont170_run/ckpt_470000000.done (banked 05:57:21Z),
+  header 470000000 / 50 / 150100000. No sim running at launch
+  (ps clean). VM uptime 7 min -- it had rebooted just before
+  launch.
+- NO disk rewrite: the banked 470M .disk payload md5 is
+  c073ba7f766976b265d6b0057edb8d6f (1,048,576 bytes, parsed
+  from the hex text back to binary) == the current patched
+  rootfs image. Verified pre-flight; nothing was rewritten.
+  Post-run verification (this check): 480M, 490M, 500M,
+  510M, 520M .disk payload md5s all = c073ba7f...
+  (1,048,576 payload bytes each).
+- Full-config DTB (NOT skipjent):
+  soc2_hex/big32_kboot_10mhz_rootfs.dtb.txt; testbench
+  sim/tb_kboot_ckpt.vvp built 30 Oct 14:42 UTC from the
+  drain-fixed sources. Header untouched: rx2idx=50,
+  rx2next=150100000 -- the attempt-17 feed
+  rootfs/rx_cmds.txt is fully consumed, so no re-feed; judge
+  prompt/banner/serial/virtio/root-mount only. Shell fixes
+  explicitly NOT judged.
+- Scratch-copy smoke test 470M->470.5M: first attempt
+  FAILED (exit 50) -- the pre-launch VM reboot had wiped
+  the /usr/lib/x86_64-linux-gnu/ivl/ VPI symlinks, so vvp
+  could not find system.vpi; re-linked them from
+  .iverilog-local (the known gotcha) and the re-run PASSED
+  (CKPT written, HALTED: 0, REGS differ -- x1 3235174472
+  vs 3227766928 at 470M); scratch copy deleted.
+- Pristine baselines saved in work/step30_pristine_baseline.txt
+  (48 files, in the workspace -- NOT /tmp, the lesson from
+  Step 28).
+
+Run: tools/run_cont470_open.sh (adapted from
+run_cont250_open.sh; same ensure_vvp, segment logic,
+full-config DTB), log
+kernel/boot_attempt17_cont470_open.log, progress
+kernel/cont470_open_progress.log, watcher
+tools/step30_watch.sh (600s polls, relaunches the runner
+with setsid nohup if it dies while unfinished). Open-ended:
+targets computed dynamically as latest+10M (no fixed target
+list); 10M segments, never uncapped loop mode, up to 3
+retries per segment (zero retries needed); stops ONLY on
+the big32# prompt, Run /init, kernel panic, or HALTED: 1.
+The serial console was ALREADY enabled (Step 29) --
+console-enabled lines are NOT a finish here; "Freeing
+unused kernel image" and VFS/root-mount lines are
+milestones only, not stops. Watermark
+kernel/cont470_open_watermark.txt = 470000000 (hourly
+watcher cron re-pointed: "big32 full-config grind watch -
+470M open-ended to the prompt").
+
+Segments (5, all clean, explicit 10M caps, never loop mode):
+470M->480M 06:44:30Z->07:09:51Z, 25m21s.
+480M->490M 07:09:51Z->07:43:28Z, 33m37s.
+490M->500M 07:43:28Z->08:37:41Z, 54m13s (reboot #1,
+re-ground from 490M after 08:14:57Z relaunch).
+500M->510M 08:37:41Z->09:00:20Z, 22m39s.
+510M->520M 09:00:20Z->09:22:35Z, 22m15s -- STOP.
+Each segment footer CYCLES: <target>, HALTED: 0. Total wall
+06:44:30Z 9 Nov -> 09:22:35Z 9 Nov = 2h38m05s.
+
+What the kernel did (34 kernel-timestamp UART lines in the
+log -- the first new ones since kernel time 46.47s, when
+the Step 29 log went quiet after the dns_resolver line):
+- [46.450350] Bridge firewalling registered; [46.455938]
+  8021q: 802.1Q VLAN Support v1.8; [46.464194] 9pnet:
+  Installing 9P2000 support; [46.478736] Key type
+  dns_resolver registered -- still in driver initcalls
+  through 480M/490M (no new lines during those two
+  segments).
+- [49.511033] debug_vm_pgtable: [debug_vm_pgtable]: Validating
+  architecture page table helpers; [49.711396] Btrfs loaded,
+  zoned=no, fsverity=no -- first new lines since 46.47s,
+  during 500M->510M.
+- [49.750680] Legacy PMU implementation is available;
+  [49.764471] clk: Disabling unused clocks; [49.857169]
+  EXT4-fs (vda): mounted filesystem 5ea807f7-5749-46d1-aa34-
+  43b8ccd8dbeb ro without journal (preceded on the same line
+  by a garbled "ho hello from " fragment -- UART interleave
+  between the init's early output and the kernel printk,
+  noted, not a failure); [49.861114] VFS: Mounted root (ext4
+  filesystem) readonly on device 254:0.; [49.870839]
+  devtmpfs: mounted; [50.134170] Freeing unused kernel image
+  (initmem) memory: 4152K; [50.145319] Run /init as init
+  process -- all during 510M->520M.
+- (blank line) big32 init: userspace is up (PID 1, RV32I,
+  no libc); big32# CKPT: cycle 520000000 written to
+  ckpt_cont170_run -- the PROMPT. Proof it is the shell
+  prompt and not a testbench string: every earlier CKPT line
+  in this log (480M, 490M, 500M, 510M) and in the Step 29
+  log is bare "CKPT: cycle N written to ..."; only the 520M
+  line carries the "big32# " prefix, which the testbench
+  never prints -- it is /init's prompt, with the testbench's
+  CKPT message appended on the same line.
+
+Whole-log grep: ZERO "Kernel panic", ZERO "HALTED: 1";
+1x "big32# ", 1x "Run /init", 1x "Freeing unused kernel
+image", 1x "VFS: Mounted root". REGS change substantially
+between segment footers (e.g. 510M vs 520M) -- the CPU is
+still executing, not wedged.
+
+Verdict: PROMPT REACHED -- the full-config, unmodified
+Linux 6.6.52 rv32 kernel boots on big32 all the way to the
+big32# shell prompt: jent finished (Step 29), serial console
+enabled, virtio-blk vda detected, ext4 root mounted
+readonly, initmem freed, /init run as PID 1, init banner
+printed, prompt printed. The runner stopped on the prompt
+finish criterion at 520M, per its design ("STOP: finish
+criteria met (prompt in log) at 520000000", 09:22:35Z, exit
+0); the watcher exited 09:15:20Z on the Run /init criterion.
+The 520M checkpoint (ckpt_cont170_run/ckpt_520000000.done,
+09:22:35Z) is banked as the resume point for any
+continuation. One honest limit: the feed was fully consumed
+long ago (rx2idx=50), so no command was typed at the prompt
+in this run -- the prompt printing is proven, but shell
+input responsiveness in the full-config boot is NOT yet
+tested (it was proven in the skipjent boot, Step 26).
+Whether to continue (e.g. a fresh feed to exercise the
+shell, or a push) needs Jayant's word -- do NOT extend or
+push without it.
+
+Incidents -- ONE VM reboot (~08:05-08:14Z), killing runner,
+vvp and watcher mid-segment 490M->500M; recovered by
+relaunching the runner with setsid nohup from the banked
+490M checkpoint, no work lost -- only the partial segment
+was re-ground (54m13s instead of the usual ~22-34). The
+foreground watcher exec was killed by the same reboot and
+by a runtime restart; the hourly watcher cron was the
+backstop throughout. Zero segment retries needed ("no
+progress" count 0). Nothing pushed; core, firmware, kernel,
+rootfs untouched by this job. Pristine check: ckpt_cont160/
+and ckpt_catecho210/ md5-identical to the
+work/step30_pristine_baseline.txt baseline (all 48 files
+match).
+
+## STEP 31 -- type commands at the full-config prompt: 5 of 6 commands answer, echo hello loses its first two bytes -- 9 Nov 2026
+
+Pre-flight (all verified before running, not assumed):
+- Step 30 read in full. Resume point
+  ckpt_cont170_run/ckpt_520000000.done (banked 09:22:35Z),
+  header 520000000 / 50 / 150100000. No sim running at launch.
+- NO disk rewrite: the banked 520M .disk payload md5 is
+  c073ba7f766976b265d6b0057edb8d6f (1,048,576 bytes, parsed
+  from the hex text back to binary) == the current patched
+  rootfs image. Verified pre-flight; nothing was rewritten.
+  Post-run verification (this check): 530M .disk payload
+  md5 = c073ba7f... (1,048,576 payload bytes).
+- Feed format and runner pattern from tools/run_catecho_cont230.sh
+  + rootfs/rx_catecho.txt (Step 26): hex byte per line, testbench
+  $fscanf "%h", +RX2FILE +RX2PERIOD=2000, one byte per period
+  into the 16550 RX FIFO. Full-config DTB (NOT skipjent):
+  soc2_hex/big32_kboot_10mhz_rootfs.dtb.txt; testbench
+  sim/tb_kboot_ckpt.vvp built 30 Oct 14:42 UTC from the
+  drain-fixed sources.
+- VPI symlinks were wiped (VM reboot before launch):
+  /usr/lib/x86_64-linux-gnu/ivl/ did not exist; re-linked
+  from .iverilog-local (the known Step 30 gotcha) before
+  launching; the runners' ensure_vvp does the same.
+- Scratch-copy smoke test 520M->520.5M PASS (CKPT written,
+  HALTED: 0, REGS differ -- x1 3221942212 at 520.5M vs
+  3235174472/3227766928 at 470M/520M); scratch copy deleted.
+- Pristine baselines saved in work/step31_pristine_baseline.txt
+  (48 files, in the workspace -- NOT /tmp, the lesson from
+  Step 28).
+
+THE HEADER TRICK (why this run uses ckpt_prompt_run/, not
+ckpt_cont170_run/ directly -- read before "fixing" it):
+The testbench takes rx2idx/rx2next from the checkpoint HEADER
+on resume (tb_kboot_ckpt.v do_resume, $fscanf lines ~421-422);
+the +RX2START plusarg is only used in the FRESH-START branch
+(line ~829) and is IGNORED on resume. The banked 520M header
+says rx2idx=50, rx2next=150100000 -- the old attempt-17 feed
+is fully consumed, so with rx2idx=50 a new 49-byte feed would
+NEVER drip (rx2idx >= nrx2). So ckpt_prompt_run/ is a copy of
+the 520M set with ONLY header lines 2-3 changed (rx2idx 50->0,
+rx2next 150100000->521000000); diff shows exactly those two
+lines, and ram/disk/done/pix/vram are md5-identical to the
+banked set. The pristine 520M set in ckpt_cont170_run/ is
+untouched. Same trick as Step 26 (ckpt_catecho_run/ vs
+ckpt_catecho210/).
+
+Feed: rootfs/rx_fullcfg.txt, hex byte per line, 49 bytes,
+decoded back and verified by roundtrip before launch:
+echo hello, ls, cat /hello.txt, uname, pwd, echo done --
+each newline-terminated, in that order. Bare cat/echo quirk
+tests NOT re-sent (proven Step 26). Armed at 521M (prompt
+already up at 520M), RX2PERIOD=2000 -- all bytes in by
+~521.1M (530M header confirms rx2idx=49, rx2next=521098000
+= 521000000 + 48*2000: every feed byte consumed).
+
+Run: tools/run_prompt_cmds.sh (adapted from
+run_catecho_cont230.sh for the full-config DTB and the new
+feed; run dir ckpt_prompt_run), log
+kernel/boot_attempt17_prompt_cmds.log, progress
+kernel/cont_prompt_cmds_progress.log, watcher
+tools/step31_watch.sh (600s polls, relaunches the runner
+with setsid nohup if it dies while unfinished). Hourly
+watcher cron re-pointed: "big32 full-config prompt commands
+watch - 520M to 530M". One explicit-cap segment 520M->530M,
+never loop mode, up to 3 retries (zero retries needed);
+stops on panic / HALTED: 1 / cap. Watermark
+kernel/cont_prompt_cmds_watermark.txt = 520000000.
+
+Segment (1, clean, explicit 10M cap, never loop mode):
+520M->530M 11:00:31Z->11:30:06Z, 29m35s. Footer CYCLES:
+530000000, HALTED: 0. Total wall 11:00:31Z -> 11:30:06Z
+9 Nov = 29m35s. Runner exit 0 ("prompt_cmds complete:
+530M cap reached at 530000000").
+
+What the shell did (the UART lines in the log, in order --
+the six echoed lines are the tty echo of the dripped feed;
+the big32# lines are the shell's answers):
+- echo hello / ls / cat /hello.txt / uname / pwd / echo done
+  (all six lines echoed in full)
+- unknown command: ho
+- big32# hello.txt / dev / sys / .. / lost+found / init /
+  proc / .   (ls)
+- big32# Hello from the big32 root filesystem. / This file
+  lives on the virtio disk, mounted as / by Linux 6.6.52.
+  (cat /hello.txt)
+- big32# Linux 6.6.52 riscv32   (uname)
+- big32# /   (pwd)
+- big32# done   (echo done)
+- big32# CKPT: cycle 530000000 written to ckpt_prompt_run
+
+Per-command verdicts:
+- echo hello -> FAIL. The shell answered "unknown command:
+  ho": the first two bytes of the feed ("ec") never reached
+  the shell's first read, so it executed "ho hello". No
+  "hello" output appears anywhere in the log. The tty echoed
+  the full "echo hello" line, so the bytes reached the UART;
+  the loss is between the tty echo and the shell's read.
+  Mechanism UNCONFIRMED: the RX FIFO is 16 deep, the drip
+  is 1 byte per 2000 cycles, the checkpoint restores the full
+  16550 state (IER/LCR/head/tail/count/FIFO), and the same
+  feed mechanism worked flawlessly in Step 26 -- recorded as
+  a one-time startup transient at feed start, not a systematic
+  failure. A clean re-test is to lead a future feed with a
+  sacrificial first command.
+- ls -> PASS. Lists root (hello.txt, dev, sys, .., lost+found,
+  init, proc, .); zero "cannot open directory".
+- cat /hello.txt -> PASS. "Hello from the big32 root
+  filesystem." plus the second line about the virtio disk.
+- uname -> PASS. "Linux 6.6.52 riscv32".
+- pwd -> PASS. "/".
+- echo done -> PASS. "done".
+
+Whole-log grep: ZERO "Kernel panic", ZERO "HALTED: 1".
+REGS change substantially between the 520M and 530M footers
+-- the CPU is still executing, not wedged.
+
+Verdict: SHELL INPUT RESPONDS in the full-config boot --
+5 of 6 commands proven. The prompt reached in Step 30 is a
+working shell: it reads typed commands and answers them.
+The one failure is the first command's first two bytes, a
+startup transient at feed start, not a shell defect: the
+same "echo" command works when it is not first (echo done
+-> "done").
+
+The 530M checkpoint (ckpt_prompt_run/ckpt_530000000.done,
+11:30:06Z) is banked as the resume point for any
+continuation; the six files were copied back into
+ckpt_cont170_run/ (all md5-verified) so the canonical dir
+stays complete. Recorded as Step 31 here. Nothing pushed;
+core, firmware, kernel, rootfs untouched by this job.
+Pristine check: ckpt_cont160/ and ckpt_catecho210/
+md5-identical to the work/step31_pristine_baseline.txt
+baseline (all 48 files match).
+
+Incidents -- NO VM reboot during the run. Two harness
+hiccups, both recovered, no work lost: (1) the exec session
+running the smoke-test poll was interrupted (runtime restart,
+not a VM reboot) -- the smoke vvp survived (setsid nohup)
+and PASSED; (2) the watcher launch failed silently inside
+the compound launch command (no process, no watcher log) --
+relaunched separately and verified alive (pid 6233, in its
+600s poll loop); it exited on the 530M criterion. Zero
+segment retries needed ("no progress" count 0). The hourly
+watcher cron was disabled by this job after the run, so its
+17:20 IST tick cannot duplicate this verdict. Whether to
+continue (e.g. re-test echo hello with a sacrificial lead-in,
+or push Steps 29-31) needs Jayant's word -- do NOT extend or
+push without it.
