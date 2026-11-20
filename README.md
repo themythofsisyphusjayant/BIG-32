@@ -1,14 +1,31 @@
 # big32
 
 [![Verilog](https://img.shields.io/badge/language-Verilog-blue)](https://github.com/themythofsisyphusjayant/BIG-32)
+[![Simulator: Icarus Verilog 12.0](https://img.shields.io/badge/simulator-Icarus%20Verilog%2012.0-lightgrey)](https://github.com/themythofsisyphusjayant/BIG-32)
+[![Linux 6.6.52](https://img.shields.io/badge/Linux-6.6.52%20rv32-green)](LINUX_BOOT.md)
 
-A 32-bit RISC-V CPU built from scratch in Verilog: a pipelined RV32IMAC core
+A 32-bit RISC-V CPU built from scratch in Verilog: a pipelined RV32IMA core
 with a single-cycle sibling, a Python behavioural model that runs the same
 programs, a two-pass assembler, a small supervisor kernel — and, in
 simulation, a Linux 6.6.52 boot to a working shell.
 
 Status as of 9 November 2026. Simulation only, throughout: Icarus Verilog
 12.0. Not silicon, not production-ready.
+
+## At a glance
+
+| Item | Detail |
+|---|---|
+| ISA | RV32IMA — base integer + M (mul/div) + A (atomics, word only); the device tree declares `rv32ima` |
+| Cores | v7 single-cycle core (`src/big32_core.v`); 5-stage pipelined core (`src/big32_core_pipe.v`) with identical semantics |
+| Pipeline | IF → ID → EX → MEM → WB; MEM-over-WB forwarding; 1-cycle load-use stall; CSR hazard stall |
+| Privilege | M/S/U modes, trap delegation, `sret`/`mret`, vectored `mtvec` |
+| MMU | Sv32, multi-cycle page-table walker, 16-entry TLB (Phase 5), A/D bit updates, `sfence.vma` |
+| Bare-core memory | Harvard: 16 KB instruction memory (4096 words), 64 KB byte-addressable data memory (modulo 64 KB) |
+| SoC memory | Unified RAM at 0x80000000 (parameterised; 32 MiB for the Linux boot) |
+| Platform (Phase 5) | SBI firmware, device tree, PLIC, 16550 UART, 64-bit CLINT, virtio-mmio block device, bootloader |
+| Verification | Directed suites + random differential testing (Python model vs Verilog), 50/50 per batch |
+| Synthesis | Yosys 0.33 on the v7 single-cycle core: 42,731 cells, 1,291 flip-flops (see below) |
 
 ## Status
 
@@ -27,6 +44,15 @@ Linux 6.6.52 rv32 boots on this CPU in Icarus Verilog simulation, mounts a
 root filesystem from a virtio block device, runs `/init` as PID 1, and drops
 into a working shell. The full step-by-step record is in
 [`LINUX_BOOT.md`](LINUX_BOOT.md).
+
+### Boot results
+
+| Step | Date | Cycles | What was proven |
+|---|---|---|---|
+| 26 | 6 Nov 2026 | 210M → 230M | Skip-jent config: shell driven at 225M; bare `cat` → `cat: missing file`, bare `echo` → newline, `echo hello` → `hello`, `cat /hello.txt` → file contents. Zero "cannot open directory", zero "Kernel panic", zero "Oops". 230M checkpoint banked. |
+| 29 | 8–9 Nov 2026 | 250M → 470M | Full unmodified config: jitterentropy (`jent_mod_init`, 1,124 SHA3 rounds) finished after a soft-lockup warning, serial console `ttyS0` enabled, virtio-blk detected `[vda] 2048 512-byte blocks`. 22 segments, 11h 50m wall. |
+| 30 | 9 Nov 2026 | 470M → 520M | Full config: ext4 root mounted readonly, `Run /init as init process`, PID 1 up, `big32#` prompt. 5 segments, 2h 38m wall. 520M checkpoint banked. |
+| 31 | 9 Nov 2026 | 520M → 530M | Full config: 5 of 6 typed commands answered — `ls`, `cat /hello.txt`, `uname` (`Linux 6.6.52 riscv32`), `pwd` (`/`), `echo done`. `echo hello` lost its first two bytes at feed start (startup transient, mechanism unconfirmed; the same `echo` works later in the run). |
 
 Two configurations are proven:
 
@@ -48,6 +74,14 @@ Two configurations are proven:
   the first two feed bytes were lost at feed start, a startup transient,
   mechanism unconfirmed (the same `echo` works later in the run). The 530M
   checkpoint is banked as the resume point.
+
+### Why the boot is slow
+
+Icarus simulates at roughly 36 minutes per 10M cycles at the grind's pace,
+so the full-config boot (170M → 530M cycles) took days of wall time in
+10M-cycle checkpointed segments. That is the simulator, not the CPU — a
+faster simulator or an FPGA is on the roadmap. Checkpoints are banked every
+10M cycles so a VM reboot costs only the partial segment, never the run.
 
 ## The core
 
@@ -81,6 +115,32 @@ in `src/big32_core_pipe.v` keeps its exact semantics — see
 - Assembler pseudos: nop, mv, li (small immediates as addi, larger ones as
   lui + addi), j, jr, ret, la (auipc + addi, pc-relative), and character
   literals in li, e.g. `li a0, 'A'`.
+
+## The pipelined core (Phase 1)
+
+`src/big32_core_pipe.v` is a 5-stage pipeline with the v7 core's exact
+instruction semantics. Full design is in [`PIPELINE.md`](PIPELINE.md).
+
+| Stage | Work |
+|---|---|
+| IF | `pc` drives the fetch address; instruction is combinational from IMEM |
+| ID | Decode only (opcode, rd, rs1, rs2, funct3/7, immediates, CSR address, AMO funct5). Register operands are not read here. JAL resolves here. |
+| EX | Register read + forwarding, ALU (incl. combinational MUL), branch/JALR resolution, CSR old-value read, multi-cycle divider. Traps, `mret`, halts resolve here. |
+| MEM | Data access. Loads form `load_data`; stores/AMO drive write enables. AMO read-modify-write is atomic here (single core, one MEM cycle); LR/SC reservation checked and updated in program order. |
+| WB | Register writeback and CSR write, at the end of the WB cycle. x0 writes discarded. |
+
+- **Forwarding:** two muxes per EX operand, priority MEM over WB over the
+  register file. For a load, the MEM forward value is the combinational
+  `load_data`; for an AMO, the old word; for SC, 0/1 from the reservation
+  check.
+- **Stalls (IF/ID frozen, bubble into EX, MEM/WB keep draining):**
+  load-use, 1 cycle — EX holds a load whose rd matches the ID
+  instruction's rs1/rs2 (the match is deliberately broad; a spurious stall
+  is safe, a missed stall is not). CSR hazard — a SYSTEM instruction in ID
+  stalls while a CSR write is pending in EX or MEM (a WB CSR write needs
+  no stall: it lands before the held instruction reaches EX).
+- **Branches and JALR resolve in EX**, using the forwarding muxes, so a
+  load feeding a branch costs the same 1-cycle stall as any load-use.
 
 ## Privilege, interrupts, MMU (Phases 2–3)
 
@@ -126,6 +186,25 @@ walks (including D-miss re-walk), software interrupts (SBI IPI register at
 rdtime), and misaligned accesses now trap (causes 4/6) instead of silently
 continuing into the next physical page. Tests: `./run_soc2.sh` (soc2 +
 coregaps + sbi + dtb + boot + the full Phase 1–4 regression).
+
+### SoC2 memory map
+
+| Region | Address | Notes |
+|---|---|---|
+| ROM (2 instructions) | 0x00000000–0x00000FFF | `lui t0, 0x80000; jalr x0, 0(t0)` — the core resets pc to 0 and RAM lives at 0x80000000, which `jal` cannot reach, so the ROM is the only bridge |
+| RAM | 0x80000000 + MEM_BYTES | Parameter, default 1 MiB; the Linux boot uses 32 MiB (`iverilog -Pbig32_soc2.MEM_BYTES=...`) |
+| PLIC | 0x0C000000 | Standard layout: priorities, enables, claim/complete |
+| CLINT | 0x02004000 mtimecmp, 0x0200BFF8 mtime | 64-bit each; mtime +1/cycle; timer pends while mtime >= mtimecmp |
+| Legacy UART | 0x10000000 TX, 0x10000004 RX, 0x10000008 status | Core-driven; kept for the SBI console and old programs |
+| virtio-mmio block | 0x10001000 | Device ID 2, version 2, queue 0 only |
+| SBI IPI register | 0x10002000 | Any nonzero write sets the core's `irq_soft` line; zero clears it |
+| 16550 UART | 0x10010000 | ns16550a-compatible; the Linux console (`ttyS0`, IRQ 2) |
+
+One Icarus lesson from this platform, recorded in
+[`LINUX_BOOT.md`](LINUX_BOOT.md): RAM is a word array with a single
+synchronous virtio read port, not a byte array with ~44 combinational read
+ports — `iverilog` on core + soc2 + testbench exits 0 in 0.062 s at the
+1 MiB default, where the byte-array version hung past 164 s.
 
 ## The tiny OS kernel
 
@@ -201,6 +280,10 @@ Every claim above is checked by a test in this repo, not by inspection:
 - **Pipelined core:** `./run_pipe.sh` — 16/16 directed checks with full
   register/UART/memory comparison, 50/50 hazard-heavy random tests, plus a
   second 50/50 batch on fresh seeds.
+- **SoC2 platform checks** (recorded in [`LINUX_BOOT.md`](LINUX_BOOT.md)):
+  PLIC PASS (32,089 cycles), software IPI PASS (258 cycles), SBI PASS
+  (32,623 cycles, UART `S`), bootloader PASS (1,573 cycles, UART `BK`).
+  Cycle counts vary a few cycles run to run.
 
 What this does not have: no RISCOF compliance, no formal verification, no
 CI, no silicon. Those are the next production steps, not claims made here.
@@ -269,6 +352,8 @@ the pipelined core are still open.
 
 ## Run it
 
+Prerequisites: Python 3 and Icarus Verilog 12.0 (`iverilog`, `vvp`).
+
 ```sh
 ./run.sh        # assembles, runs the Python model, compiles + simulates the Verilog
 python3 tools/rand_test.py 50 0   # random differential tests, model vs Verilog
@@ -281,6 +366,15 @@ Per phase:
 ./run_soc.sh    # Phases 2–3: SoC checks + Phase 1 regression
 ./run_os.sh     # Phase 4: OS boot transcript + full regression
 ./run_soc2.sh   # Phase 5: SoC2 platform + full Phase 1–4 regression
+```
+
+Run one program by hand:
+
+```sh
+python3 tools/asm.py programs/sum.s programs/sum.hex   # two-pass assembler
+python3 tools/model.py programs/sum.hex                 # Python behavioural model
+iverilog -o sim/tb_big32.vvp src/big32.v src/big32_core.v sim/tb_big32.v
+vvp sim/tb_big32.vvp +HEX=programs/sum.hex
 ```
 
 ## Reproducing the Linux boot — and what is not in this repo
