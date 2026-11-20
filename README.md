@@ -54,6 +54,12 @@ into a working shell. The full step-by-step record is in
 | 30 | 9 Nov 2026 | 470M → 520M | Full config: ext4 root mounted readonly, `Run /init as init process`, PID 1 up, `big32#` prompt. 5 segments, 2h 38m wall. 520M checkpoint banked. |
 | 31 | 9 Nov 2026 | 520M → 530M | Full config: 5 of 6 typed commands answered — `ls`, `cat /hello.txt`, `uname` (`Linux 6.6.52 riscv32`), `pwd` (`/`), `echo done`. `echo hello` lost its first two bytes at feed start (startup transient, mechanism unconfirmed; the same `echo` works later in the run). |
 
+![Linux boot progress on big32](docs/boot-progress.png)
+
+*Checkpoint cycles reached at each boot step (Linux 6.6.52, full unmodified
+config, Nov 2026). Data: the boot-results table above — Step 26: 230M,
+Step 29: 470M, Step 30: 520M, Step 31: 530M.*
+
 Two configurations are proven:
 
 - **Skip-jent config (Step 26, 6 Nov 2026).** The boot was resumed from a
@@ -128,6 +134,18 @@ instruction semantics. Full design is in [`PIPELINE.md`](PIPELINE.md).
 | EX | Register read + forwarding, ALU (incl. combinational MUL), branch/JALR resolution, CSR old-value read, multi-cycle divider. Traps, `mret`, halts resolve here. |
 | MEM | Data access. Loads form `load_data`; stores/AMO drive write enables. AMO read-modify-write is atomic here (single core, one MEM cycle); LR/SC reservation checked and updated in program order. |
 | WB | Register writeback and CSR write, at the end of the WB cycle. x0 writes discarded. |
+
+```mermaid
+flowchart LR
+    PC["PC"] --> IF["IF: fetch from IMEM"]
+    IF --> ID["ID: decode only<br/>JAL resolves here"]
+    ID --> EX["EX: register read + forwarding<br/>ALU, branch / JALR, CSR read<br/>multi-cycle divider"]
+    EX --> MEM["MEM: data access<br/>loads / stores / AMO<br/>LR/SC reservation"]
+    MEM --> WB["WB: register + CSR writeback"]
+    MEM -. "forward: MEM over WB" .-> EX
+    WB -. "forward" .-> EX
+    EX -. "load-use / CSR hazard: 1-cycle stall<br/>(IF/ID frozen, bubble into EX)" .-> ID
+```
 
 - **Forwarding:** two muxes per EX operand, priority MEM over WB over the
   register file. For a load, the MEM forward value is the combinational
